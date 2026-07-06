@@ -101,6 +101,7 @@ struct LaneInfo
 {
     QString name;
     QRectF rect;
+    int level = 0;
 };
 
 enum LaneListRole
@@ -295,25 +296,33 @@ public:
         return QRectF(0.0, 0.0, width, CLIP_HEIGHT).adjusted(-1.0, -1.0, 1.0, 1.0);
     }
 
-    void SetPreview(qreal clip_width, QColor preview_color)
+    void SetPreview(qreal clip_width, const EffectDefinition& preview_effect)
     {
         prepareGeometryChange();
         width = clip_width;
-        color = preview_color;
+        effect = preview_effect;
         update();
     }
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override
     {
         painter->setRenderHint(QPainter::Antialiasing, true);
-        painter->setBrush(WithAlpha(color, 48));
-        painter->setPen(QPen(WithAlpha(color.darker(110), 145), 1.0, Qt::DashLine));
+        painter->setBrush(WithAlpha(effect.color, 48));
+        painter->setPen(QPen(WithAlpha(effect.color.darker(110), 145), 1.0, Qt::DashLine));
         painter->drawRoundedRect(QRectF(0.0, 0.0, width, CLIP_HEIGHT), 5.0, 5.0);
+
+        painter->setPen(WithAlpha(Qt::white, 150));
+        QFont font = painter->font();
+        font.setBold(true);
+        painter->setFont(font);
+        const QRectF text_rect(9.0, 0.0, qMax<qreal>(0.0, width - 18.0), CLIP_HEIGHT);
+        painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft,
+            QFontMetrics(font).elidedText(effect.name, Qt::ElideRight, static_cast<int>(text_rect.width())));
     }
 
 private:
     qreal width = CLIP_DEFAULT_WIDTH;
-    QColor color = QColor("#888888");
+    EffectDefinition effect;
 };
 
 class MusicSpectrumItem : public QGraphicsItem
@@ -563,11 +572,11 @@ public:
         RebuildLayout();
     }
 
-    void SetLanes(const QVector<QString>& names, const QString& empty_text)
+    void SetLanes(const QVector<LaneEntry>& entries, const QString& empty_text)
     {
         CancelDrag();
         ClearClips();
-        lane_names = names;
+        lane_entries = entries;
         empty_message = empty_text;
         RebuildLayout();
     }
@@ -648,7 +657,7 @@ public:
 
         const qreal clip_width = DefaultClipWidth();
         const qreal x = ClampClipX(lane, pos.x() - clip_width / 2.0, clip_width);
-        ShowPreview(lane, x, clip_width, effect.color);
+        ShowPreview(lane, x, clip_width, effect);
         return true;
     }
 
@@ -691,7 +700,7 @@ protected:
         PaintRow(painter, QRectF(0.0, 0.0, sceneRect().width(), ROW_HEIGHT),
             music_row_color, TextLineColor(palette, 52, 82), TextLineColor(palette, 24, 42), rect);
 
-        if(lane_names.empty())
+        if(lane_entries.empty())
         {
             if(!empty_message.isEmpty())
             {
@@ -707,7 +716,7 @@ protected:
         }
 
         const int first_lane = qMax(0, static_cast<int>(std::floor((rect.top() - ROW_HEIGHT) / ROW_HEIGHT)));
-        const int last_lane = qMin(lane_names.size() - 1, static_cast<int>(std::floor((rect.bottom() - ROW_HEIGHT) / ROW_HEIGHT)));
+        const int last_lane = qMin(lane_entries.size() - 1, static_cast<int>(std::floor((rect.bottom() - ROW_HEIGHT) / ROW_HEIGHT)));
 
         for(int i = first_lane; i <= last_lane; i++)
         {
@@ -721,6 +730,8 @@ protected:
             PaintRow(painter, QRectF(0.0, ROW_HEIGHT + i * ROW_HEIGHT, sceneRect().width(), ROW_HEIGHT),
                 row_color, TextLineColor(palette, 38, 72), TextLineColor(palette, 20, 38), rect);
         }
+
+        PaintInheritedClips(painter, rect);
     }
 
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override
@@ -889,21 +900,26 @@ private:
         ClearLayoutItems();
         lanes.clear();
 
-        const int lane_count = qMax(1, lane_names.size());
+        const int lane_count = qMax(1, lane_entries.size());
         const qreal content_height = ROW_HEIGHT + lane_count * ROW_HEIGHT;
         const qreal scene_width = qMax(qMax<qreal>(TIMELINE_MIN_WIDTH, viewport_size.width()), MusicPixelWidth());
         const qreal scene_height = qMax<qreal>(content_height, viewport_size.height());
 
         setSceneRect(0.0, 0.0, scene_width, scene_height);
 
-        for(int i = 0; i < lane_names.size(); i++)
+        for(int i = 0; i < lane_entries.size(); i++)
         {
-            lanes.push_back({lane_names[i], QRectF(0.0, ROW_HEIGHT + i * ROW_HEIGHT, scene_width, ROW_HEIGHT)});
+            lanes.push_back({lane_entries[i].name, QRectF(0.0, ROW_HEIGHT + i * ROW_HEIGHT, scene_width, ROW_HEIGHT), lane_entries[i].level});
         }
 
         invalidate(sceneRect(), QGraphicsScene::BackgroundLayer);
         AddMusicItems();
         RelayoutClips();
+    }
+
+    void RefreshInheritedClips()
+    {
+        invalidate(sceneRect(), QGraphicsScene::BackgroundLayer);
     }
 
     void PaintRow(QPainter* painter, const QRectF& row_rect, const QColor& fill, const QColor& border,
@@ -950,6 +966,82 @@ private:
             clip->SetLaneIndex(lane);
             const qreal x = ClampClipX(lane, clip->pos().x(), clip->ClipWidth());
             clip->setPos(x, ClipY(lane));
+        }
+
+        RefreshInheritedClips();
+    }
+
+    bool IsDescendantLane(int lane, int ancestor_lane) const
+    {
+        if(lane <= ancestor_lane || lane >= lanes.size() || ancestor_lane >= lanes.size())
+        {
+            return false;
+        }
+
+        const int ancestor_level = lanes[ancestor_lane].level;
+        for(int i = ancestor_lane + 1; i <= lane; i++)
+        {
+            if(lanes[i].level <= ancestor_level)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    void PaintGhostClip(QPainter* painter, const QRectF& exposed, int lane, qreal x, qreal width,
+        const EffectDefinition& effect, bool preview_ghost) const
+    {
+        const QRectF ghost_rect(x, ClipY(lane), width, CLIP_HEIGHT);
+        if(!ghost_rect.intersects(exposed))
+        {
+            return;
+        }
+
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setBrush(WithAlpha(effect.color, preview_ghost ? 36 : 44));
+        painter->setPen(QPen(WithAlpha(effect.color.darker(115), preview_ghost ? 100 : 125),
+            1.0, preview_ghost ? Qt::DashLine : Qt::SolidLine));
+        painter->drawRoundedRect(ghost_rect, 5.0, 5.0);
+
+        QFont font = painter->font();
+        font.setBold(true);
+        painter->setFont(font);
+        painter->setPen(WithAlpha(Qt::white, preview_ghost ? 88 : 110));
+        painter->drawText(ghost_rect.adjusted(9.0, 0.0, -9.0, 0.0), Qt::AlignVCenter | Qt::AlignLeft,
+            QFontMetrics(font).elidedText(effect.name, Qt::ElideRight, static_cast<int>(ghost_rect.width() - 18.0)));
+    }
+
+    void PaintInheritedClips(QPainter* painter, const QRectF& exposed) const
+    {
+        for(int lane = 0; lane < lanes.size(); lane++)
+        {
+            if(!lanes[lane].rect.intersects(exposed))
+            {
+                continue;
+            }
+
+            for(int ancestor_lane = 0; ancestor_lane < lane; ancestor_lane++)
+            {
+                if(!IsDescendantLane(lane, ancestor_lane))
+                {
+                    continue;
+                }
+
+                for(TimelineClipItem* clip : clips)
+                {
+                    if(clip->LaneIndex() == ancestor_lane)
+                    {
+                        PaintGhostClip(painter, exposed, lane, clip->pos().x(), clip->ClipWidth(), clip->Effect(), false);
+                    }
+                }
+
+                if(active_clip == nullptr && last_preview_lane == ancestor_lane)
+                {
+                    PaintGhostClip(painter, exposed, lane, last_preview_x, last_preview_width, last_preview_effect, true);
+                }
+            }
         }
     }
 
@@ -1074,7 +1166,7 @@ private:
         const qreal x = ClampClipX(target_lane, pos.x() - drag_offset.x(), width);
         active_clip->SetLaneIndex(target_lane);
         active_clip->setPos(x, ClipY(target_lane));
-        ShowPreview(target_lane, x, width, active_clip->Effect().color);
+        ShowPreview(target_lane, x, width, active_clip->Effect());
     }
 
     void UpdateClipResize(const QPointF& pos)
@@ -1088,10 +1180,10 @@ private:
         const qreal max_width = lanes[lane].rect.right() - clip_start_x;
         const qreal width = qBound(CLIP_MIN_WIDTH, clip_start_width + pos.x() - drag_scene_start.x(), max_width);
         active_clip->SetClipWidth(width);
-        ShowPreview(lane, clip_start_x, width, active_clip->Effect().color);
+        ShowPreview(lane, clip_start_x, width, active_clip->Effect());
     }
 
-    void ShowPreview(int lane, qreal x, qreal width, const QColor& color)
+    void ShowPreview(int lane, qreal x, qreal width, const EffectDefinition& effect)
     {
         if(preview == nullptr)
         {
@@ -1099,11 +1191,14 @@ private:
             addItem(preview);
         }
 
-        preview->SetPreview(width, color);
+        preview->SetPreview(width, effect);
         preview->setPos(x, ClipY(lane));
         preview->setVisible(true);
         last_preview_lane = lane;
         last_preview_x = x;
+        last_preview_width = width;
+        last_preview_effect = effect;
+        RefreshInheritedClips();
     }
 
     void HidePreview()
@@ -1115,6 +1210,8 @@ private:
 
         last_preview_lane = -1;
         last_preview_x = 0.0;
+        last_preview_width = CLIP_DEFAULT_WIDTH;
+        RefreshInheritedClips();
     }
 
     void AddClip(const EffectDefinition& effect, int lane, qreal x, qreal width)
@@ -1130,6 +1227,7 @@ private:
         clip->setPos(ClampClipX(lane, x, width), ClipY(lane));
         addItem(clip);
         clips.push_back(clip);
+        RefreshInheritedClips();
     }
 
     qreal DefaultClipWidth() const
@@ -1147,6 +1245,8 @@ private:
         {
             active_clip = nullptr;
         }
+
+        RefreshInheritedClips();
     }
 
     void CancelDrag()
@@ -1164,7 +1264,7 @@ private:
 
     QPalette palette;
     QSize viewport_size;
-    QVector<QString> lane_names;
+    QVector<LaneEntry> lane_entries;
     QVector<LaneInfo> lanes;
     QVector<QGraphicsItem*> layout_items;
     QVector<TimelineClipItem*> clips;
@@ -1182,6 +1282,8 @@ private:
     qreal clip_start_width = CLIP_DEFAULT_WIDTH;
     int last_preview_lane = -1;
     qreal last_preview_x = 0.0;
+    qreal last_preview_width = CLIP_DEFAULT_WIDTH;
+    EffectDefinition last_preview_effect;
     TimelineClipItem* active_clip = nullptr;
     ClipPreviewItem* preview = nullptr;
     MusicSpectrumItem* music_item = nullptr;
@@ -1306,7 +1408,7 @@ public:
         const int left = opt.rect.left() + 13;
         const int step = 18;
         const int middle_y = opt.rect.center().y();
-        const QColor line_color = TextLineColor(opt.palette, 78, 106);
+        const QColor line_color = opt.palette.color(QPalette::Text);
 
         if(is_tree_item)
         {
@@ -1480,7 +1582,7 @@ public:
         SyncRuler();
     }
 
-    void SetLanes(const QVector<QString>& lanes, const QString& empty_text)
+    void SetLanes(const QVector<LaneEntry>& lanes, const QString& empty_text)
     {
         light_scene->SetLanes(lanes, empty_text);
         SyncRuler();
@@ -1962,15 +2064,7 @@ private:
     void SetLanes(const QVector<LaneEntry>& lanes, const QString& empty_message)
     {
         lane_list->SetLanes(lanes);
-
-        QVector<QString> lane_names;
-        lane_names.reserve(lanes.size());
-        for(const LaneEntry& lane : lanes)
-        {
-            lane_names.push_back(lane.name);
-        }
-
-        view->SetLanes(lane_names, empty_message);
+        view->SetLanes(lanes, empty_message);
     }
 
     ResourceManagerInterface* resource_manager;
