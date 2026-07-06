@@ -41,6 +41,7 @@
 #include <QScrollBar>
 #include <QSize>
 #include <QSizePolicy>
+#include <QSlider>
 #include <QStyleOptionGraphicsItem>
 #include <QTimer>
 #include <QTransform>
@@ -79,6 +80,8 @@ const qreal CLIP_HEIGHT = 32.0;
 const qreal CLIP_MIN_WIDTH = 72.0;
 const qreal CLIP_DEFAULT_WIDTH = 130.0;
 const qreal GRID_WIDTH = 80.0;
+const qreal TIMELINE_ZOOM_MIN = 40.0;
+const qreal TIMELINE_ZOOM_MAX = 240.0;
 const qreal RESIZE_HANDLE_WIDTH = 9.0;
 const qreal CLIP_DRAG_HANDLE_WIDTH = 22.0;
 const qreal REMOVE_BUTTON_SIZE = 18.0;
@@ -341,16 +344,18 @@ public:
         }
 
         painter->setRenderHint(QPainter::Antialiasing, false);
-        painter->setPen(QPen(QColor(64, 188, 255, 92), 1.0));
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(64, 188, 255, 92));
 
         const qreal center_y = height / 2.0;
         const qreal step = width / levels.size();
+        const qreal bar_width = qMax<qreal>(1.0, step * 0.72);
 
         for(int i = 0; i < levels.size(); i++)
         {
-            const qreal x = i * step;
+            const qreal x = i * step + (step - bar_width) / 2.0;
             const qreal bar_height = qMax<qreal>(2.0, levels[i] * height * 0.42);
-            painter->drawLine(QPointF(x, center_y - bar_height), QPointF(x, center_y + bar_height));
+            painter->drawRect(QRectF(x, center_y - bar_height, bar_width, bar_height * 2.0));
         }
     }
 
@@ -589,6 +594,34 @@ public:
         music_seek_callback = std::move(callback);
     }
 
+    bool SetPixelsPerSecond(qreal value)
+    {
+        value = qBound(TIMELINE_ZOOM_MIN, value, TIMELINE_ZOOM_MAX);
+
+        if(qFuzzyCompare(pixels_per_second, value))
+        {
+            return false;
+        }
+
+        CancelDrag();
+        const qreal ratio = value / pixels_per_second;
+
+        for(TimelineClipItem* clip : clips)
+        {
+            clip->SetClipWidth(clip->ClipWidth() * ratio);
+            clip->setPos(clip->pos().x() * ratio, clip->pos().y());
+        }
+
+        pixels_per_second = value;
+        RebuildLayout();
+        return true;
+    }
+
+    qreal PixelsPerSecond() const
+    {
+        return pixels_per_second;
+    }
+
     qreal ContentWidth() const
     {
         return sceneRect().width();
@@ -610,8 +643,9 @@ public:
             return false;
         }
 
-        const qreal x = ClampClipX(lane, pos.x() - CLIP_DEFAULT_WIDTH / 2.0, CLIP_DEFAULT_WIDTH);
-        ShowPreview(lane, x, CLIP_DEFAULT_WIDTH, effect.color);
+        const qreal clip_width = DefaultClipWidth();
+        const qreal x = ClampClipX(lane, pos.x() - clip_width / 2.0, clip_width);
+        ShowPreview(lane, x, clip_width, effect.color);
         return true;
     }
 
@@ -629,7 +663,8 @@ public:
             return false;
         }
 
-        AddClip(effect, lane, pos.x() - CLIP_DEFAULT_WIDTH / 2.0, CLIP_DEFAULT_WIDTH);
+        const qreal clip_width = DefaultClipWidth();
+        AddClip(effect, lane, pos.x() - clip_width / 2.0, clip_width);
         return true;
     }
 
@@ -856,7 +891,7 @@ private:
         const QRectF lane_rect(0.0, y, sceneRect().width(), ROW_HEIGHT);
         Track(addRect(lane_rect, QPen(TextLineColor(palette, 38, 72)), QBrush(row_color)));
 
-        for(qreal x = GRID_WIDTH; x < lane_rect.width(); x += GRID_WIDTH)
+        for(qreal x = pixels_per_second; x < lane_rect.width(); x += pixels_per_second)
         {
             Track(addLine(x, y + 1.0, x, y + ROW_HEIGHT - 1.0, QPen(TextLineColor(palette, 20, 38))));
         }
@@ -921,7 +956,7 @@ private:
             return 0.0;
         }
 
-        return music_duration_ms * GRID_WIDTH / 1000.0;
+        return music_duration_ms * pixels_per_second / 1000.0;
     }
 
     void AddMusicItems()
@@ -937,7 +972,7 @@ private:
 
         Track(addRect(row_rect, QPen(TextLineColor(palette, 52, 82)), QBrush(row_color)));
 
-        for(qreal x = GRID_WIDTH; x < row_rect.width(); x += GRID_WIDTH)
+        for(qreal x = pixels_per_second; x < row_rect.width(); x += pixels_per_second)
         {
             Track(addLine(x, 1.0, x, ROW_HEIGHT - 1.0, QPen(TextLineColor(palette, 24, 42))));
         }
@@ -970,7 +1005,7 @@ private:
             return;
         }
 
-        const qreal x = qBound<qreal>(0.0, music_position_ms * GRID_WIDTH / 1000.0, sceneRect().right());
+        const qreal x = qBound<qreal>(0.0, music_position_ms * pixels_per_second / 1000.0, sceneRect().right());
         playhead_item->setLine(x, 0.0, x, sceneRect().height());
 
         if(playhead_handle != nullptr)
@@ -993,7 +1028,7 @@ private:
             return;
         }
 
-        const qint64 position_ms = qBound<qint64>(0, static_cast<qint64>(x * 1000.0 / GRID_WIDTH), music_duration_ms);
+        const qint64 position_ms = qBound<qint64>(0, static_cast<qint64>(x * 1000.0 / pixels_per_second), music_duration_ms);
         SetMusicPosition(position_ms);
 
         if(music_seek_callback)
@@ -1078,6 +1113,11 @@ private:
         clips.push_back(clip);
     }
 
+    qreal DefaultClipWidth() const
+    {
+        return qMax(CLIP_MIN_WIDTH, CLIP_DEFAULT_WIDTH * pixels_per_second / GRID_WIDTH);
+    }
+
     void RemoveClip(TimelineClipItem* clip)
     {
         clips.removeOne(clip);
@@ -1114,6 +1154,7 @@ private:
     std::function<void(qint64)> music_seek_callback;
     qint64 music_duration_ms = 0;
     qint64 music_position_ms = 0;
+    qreal pixels_per_second = GRID_WIDTH;
 
     DragMode drag_mode = NoDrag;
     QPointF drag_offset;
@@ -1149,6 +1190,17 @@ public:
         update();
     }
 
+    void SetPixelsPerSecond(qreal value)
+    {
+        if(qFuzzyCompare(pixels_per_second, value))
+        {
+            return;
+        }
+
+        pixels_per_second = qBound(TIMELINE_ZOOM_MIN, value, TIMELINE_ZOOM_MAX);
+        update();
+    }
+
     void SetScrollOffset(int offset)
     {
         if(horizontal_offset == offset)
@@ -1174,11 +1226,11 @@ protected:
         painter.setPen(QPen(line_color));
         painter.drawLine(QPointF(0.0, base_y), QPointF(width(), base_y));
 
-        for(qreal x = 0.0; x <= content_width; x += GRID_WIDTH)
+        for(qreal x = 0.0; x <= content_width; x += pixels_per_second)
         {
             const qreal view_x = x - horizontal_offset;
 
-            if(view_x < -GRID_WIDTH || view_x > width() + GRID_WIDTH)
+            if(view_x < -pixels_per_second || view_x > width() + pixels_per_second)
             {
                 continue;
             }
@@ -1187,12 +1239,13 @@ protected:
             painter.drawLine(QPointF(view_x, 12.0), QPointF(view_x, base_y));
             painter.setPen(text_color);
             painter.drawText(QRectF(view_x + 4.0, 0.0, 48.0, height() - 8.0),
-                Qt::AlignVCenter | Qt::AlignLeft, QString::number(static_cast<int>(x / GRID_WIDTH)) + "s");
+                Qt::AlignVCenter | Qt::AlignLeft, QString::number(static_cast<int>(x / pixels_per_second)) + "s");
         }
     }
 
 private:
     qreal content_width = TIMELINE_MIN_WIDTH;
+    qreal pixels_per_second = GRID_WIDTH;
     int horizontal_offset = 0;
 };
 
@@ -1331,6 +1384,21 @@ public:
         light_scene->SetMusicSeekCallback(std::move(callback));
     }
 
+    void SetHorizontalZoom(int pixels_per_second)
+    {
+        const QPoint anchor = viewport()->rect().center();
+        const qreal old_scene_x = mapToScene(anchor).x();
+        const qreal old_pixels_per_second = light_scene->PixelsPerSecond();
+
+        if(!light_scene->SetPixelsPerSecond(pixels_per_second))
+        {
+            return;
+        }
+
+        SyncRuler();
+        horizontalScrollBar()->setValue(static_cast<int>(old_scene_x * light_scene->PixelsPerSecond() / old_pixels_per_second - anchor.x()));
+    }
+
 protected:
     void resizeEvent(QResizeEvent* event) override
     {
@@ -1405,6 +1473,7 @@ private:
         }
 
         ruler->SetContentWidth(light_scene->ContentWidth());
+        ruler->SetPixelsPerSecond(light_scene->PixelsPerSecond());
         ruler->SetScrollOffset(horizontalScrollBar()->value());
     }
 
@@ -1461,9 +1530,15 @@ public:
         music_label->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
         choose_music_button = new QPushButton("Music...", timeline_header);
         play_button = new QPushButton("Play", timeline_header);
+        QSlider* zoom_slider = new QSlider(Qt::Horizontal, timeline_header);
+        zoom_slider->setRange(static_cast<int>(TIMELINE_ZOOM_MIN), static_cast<int>(TIMELINE_ZOOM_MAX));
+        zoom_slider->setValue(static_cast<int>(GRID_WIDTH));
+        zoom_slider->setFixedWidth(120);
+        zoom_slider->setToolTip("Timeline zoom");
         play_button->setEnabled(false);
         timeline_header_layout->addWidget(timeline_title);
         timeline_header_layout->addWidget(music_label, 1);
+        timeline_header_layout->addWidget(zoom_slider);
         timeline_header_layout->addWidget(choose_music_button);
         timeline_header_layout->addWidget(play_button);
         center_layout->addWidget(timeline_header);
@@ -1493,6 +1568,10 @@ public:
         connect(play_button, &QPushButton::clicked, this, [this]()
         {
             ToggleMusicPlayback();
+        });
+        connect(zoom_slider, &QSlider::valueChanged, this, [this](int value)
+        {
+            view->SetHorizontalZoom(value);
         });
         connect(music_timer, &QTimer::timeout, this, [this]()
         {
