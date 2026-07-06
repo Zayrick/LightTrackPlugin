@@ -56,10 +56,13 @@ const qreal TIMELINE_MIN_WIDTH = 900.0;
 const qreal SIDE_PANEL_WIDTH = 178.0;
 const qreal CARD_HEIGHT = 42.0;
 const qreal CLIP_HEIGHT = 32.0;
-const qreal CLIP_MIN_WIDTH = 56.0;
+const qreal CLIP_MIN_WIDTH = 72.0;
 const qreal CLIP_DEFAULT_WIDTH = 130.0;
 const qreal GRID_WIDTH = 80.0;
 const qreal RESIZE_HANDLE_WIDTH = 9.0;
+const qreal CLIP_DRAG_HANDLE_WIDTH = 22.0;
+const qreal REMOVE_BUTTON_SIZE = 18.0;
+const qreal REMOVE_BUTTON_RIGHT_MARGIN = RESIZE_HANDLE_WIDTH + 8.0;
 
 struct EffectDefinition
 {
@@ -221,19 +224,47 @@ public:
         painter->setBrush(effect.color);
         painter->drawRoundedRect(boundingRect(), 5.0, 5.0);
 
+        if(removable)
+        {
+            const QRectF handle_rect = DragHandleRect();
+            painter->setPen(QPen(WithAlpha(Qt::white, 70), 1.0));
+            painter->drawLine(QPointF(handle_rect.right(), 7.0), QPointF(handle_rect.right(), CLIP_HEIGHT - 7.0));
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(WithAlpha(Qt::white, 150));
+
+            for(int row = 0; row < 3; row++)
+            {
+                for(int column = 0; column < 2; column++)
+                {
+                    painter->drawEllipse(QPointF(7.5 + column * 6.0, 10.0 + row * 6.0), 1.35, 1.35);
+                }
+            }
+
+            painter->setPen(QPen(WithAlpha(Qt::white, 75), 1.0));
+            painter->drawLine(QPointF(width - RESIZE_HANDLE_WIDTH, 7.0), QPointF(width - RESIZE_HANDLE_WIDTH, CLIP_HEIGHT - 7.0));
+        }
+
         painter->setPen(Qt::white);
         QFont font = painter->font();
         font.setBold(true);
         painter->setFont(font);
 
-        const qreal close_space = removable ? 28.0 : 12.0;
-        const QRectF text_rect = QRectF(9.0, 0.0, qMax<qreal>(0.0, width - close_space), CLIP_HEIGHT);
+        const qreal text_left = removable ? CLIP_DRAG_HANDLE_WIDTH + 7.0 : 9.0;
+        const qreal text_right = removable ? RemoveRect().left() - 7.0 : width - 12.0;
+        const QRectF text_rect = QRectF(text_left, 0.0, qMax<qreal>(0.0, text_right - text_left), CLIP_HEIGHT);
         const QString label = QFontMetrics(font).elidedText(effect.name, Qt::ElideRight, static_cast<int>(text_rect.width()));
         painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, label);
 
         if(removable)
         {
             const QRectF close_rect = RemoveRect();
+            if(hover_remove)
+            {
+                painter->setBrush(WithAlpha(Qt::white, 22));
+                painter->setPen(QPen(WithAlpha(Qt::white, 180), 1.0));
+                painter->drawRoundedRect(close_rect.adjusted(0.5, 0.5, -0.5, -0.5), 3.0, 3.0);
+            }
+
             painter->setPen(QPen(Qt::white, 1.6, Qt::SolidLine, Qt::RoundCap));
             painter->drawLine(close_rect.topLeft() + QPointF(4.0, 4.0), close_rect.bottomRight() - QPointF(4.0, 4.0));
             painter->drawLine(close_rect.topRight() + QPointF(-4.0, 4.0), close_rect.bottomLeft() + QPointF(4.0, -4.0));
@@ -242,7 +273,30 @@ public:
 
     void hoverMoveEvent(QGraphicsSceneHoverEvent* event) override
     {
-        setCursor(IsResizeHandle(event->pos()) ? Qt::SizeHorCursor : Qt::OpenHandCursor);
+        SetRemoveHover(IsRemoveButton(event->pos()));
+
+        if(IsResizeHandle(event->pos()))
+        {
+            setCursor(Qt::SizeHorCursor);
+        }
+        else if(IsRemoveButton(event->pos()))
+        {
+            setCursor(Qt::PointingHandCursor);
+        }
+        else if(IsDragHandle(event->pos()))
+        {
+            setCursor(Qt::OpenHandCursor);
+        }
+        else
+        {
+            unsetCursor();
+        }
+    }
+
+    void hoverLeaveEvent(QGraphicsSceneHoverEvent*) override
+    {
+        SetRemoveHover(false);
+        unsetCursor();
     }
 
     EffectDefinition Effect() const
@@ -277,21 +331,43 @@ public:
         return removable && pos.x() >= width - RESIZE_HANDLE_WIDTH;
     }
 
+    bool IsDragHandle(const QPointF& pos) const
+    {
+        return removable && DragHandleRect().contains(pos);
+    }
+
     bool IsRemoveButton(const QPointF& pos) const
     {
         return removable && RemoveRect().contains(pos);
     }
 
 private:
+    QRectF DragHandleRect() const
+    {
+        return QRectF(0.0, 0.0, CLIP_DRAG_HANDLE_WIDTH, CLIP_HEIGHT);
+    }
+
     QRectF RemoveRect() const
     {
-        return QRectF(width - 24.0, 6.0, 18.0, 20.0);
+        return QRectF(width - REMOVE_BUTTON_RIGHT_MARGIN - REMOVE_BUTTON_SIZE, 7.0, REMOVE_BUTTON_SIZE, REMOVE_BUTTON_SIZE);
+    }
+
+    void SetRemoveHover(bool hover)
+    {
+        if(hover_remove == hover)
+        {
+            return;
+        }
+
+        hover_remove = hover;
+        update(RemoveRect().adjusted(-2.0, -2.0, 2.0, 2.0));
     }
 
     EffectDefinition effect;
     int lane_index = 0;
     qreal width = CLIP_DEFAULT_WIDTH;
     bool removable = true;
+    bool hover_remove = false;
 };
 
 class LightTrackScene : public QGraphicsScene
@@ -398,6 +474,12 @@ protected:
         if(clip->IsRemoveButton(local_pos))
         {
             RemoveClip(clip);
+            event->accept();
+            return;
+        }
+
+        if(!clip->IsResizeHandle(local_pos) && !clip->IsDragHandle(local_pos))
+        {
             event->accept();
             return;
         }
