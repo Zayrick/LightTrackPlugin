@@ -15,8 +15,12 @@
 #include <QEvent>
 #include <QFont>
 #include <QFontMetrics>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGraphicsItem>
+#include <QGraphicsEllipseItem>
 #include <QGraphicsLineItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
@@ -33,14 +37,26 @@
 #include <QPainter>
 #include <QPalette>
 #include <QPen>
+#include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QSize>
+#include <QSizePolicy>
 #include <QStyleOptionGraphicsItem>
+#include <QTimer>
 #include <QTransform>
 #include <QVector>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QDir>
+
+#include <cmath>
+#include <functional>
+
+#ifdef _WIN32
+#include <qt_windows.h>
+#include <mmsystem.h>
+#endif
 
 namespace
 {
@@ -63,6 +79,8 @@ const qreal RESIZE_HANDLE_WIDTH = 9.0;
 const qreal CLIP_DRAG_HANDLE_WIDTH = 22.0;
 const qreal REMOVE_BUTTON_SIZE = 18.0;
 const qreal REMOVE_BUTTON_RIGHT_MARGIN = RESIZE_HANDLE_WIDTH + 8.0;
+const qreal PLAYHEAD_HANDLE_RADIUS = 6.0;
+const int MUSIC_SPECTRUM_BARS = 1200;
 
 struct EffectDefinition
 {
@@ -95,6 +113,56 @@ QColor WithAlpha(QColor color, int alpha)
 QColor TextLineColor(const QPalette& palette, int light_alpha, int dark_alpha)
 {
     return WithAlpha(palette.color(QPalette::Text), palette.color(QPalette::Window).lightness() < 128 ? dark_alpha : light_alpha);
+}
+
+QVector<qreal> BuildMusicSpectrumPreview(const QString& path)
+{
+    QFile file(path);
+    if(!file.open(QIODevice::ReadOnly) || file.size() <= 0)
+    {
+        return {};
+    }
+
+    QVector<qreal> levels;
+    levels.reserve(MUSIC_SPECTRUM_BARS);
+    qreal peak = 0.0;
+    const qint64 size = file.size();
+
+    // ponytail: compressed files use cheap byte-energy preview; use a decoder/FFT when exact spectrum matters.
+    for(int i = 0; i < MUSIC_SPECTRUM_BARS; i++)
+    {
+        const qint64 start = size * i / MUSIC_SPECTRUM_BARS;
+        const qint64 end = size * (i + 1) / MUSIC_SPECTRUM_BARS;
+        const qint64 length = qMin<qint64>(4096, end - start);
+
+        if(length <= 0 || !file.seek(start))
+        {
+            levels.push_back(0.0);
+            continue;
+        }
+
+        const QByteArray bytes = file.read(length);
+        qreal sum = 0.0;
+
+        for(char byte : bytes)
+        {
+            sum += qAbs(static_cast<int>(static_cast<unsigned char>(byte)) - 128);
+        }
+
+        const qreal level = bytes.isEmpty() ? 0.0 : std::sqrt(sum / (bytes.size() * 128.0));
+        levels.push_back(level);
+        peak = qMax(peak, level);
+    }
+
+    if(peak > 0.0)
+    {
+        for(qreal& level : levels)
+        {
+            level = qBound<qreal>(0.02, level / peak, 1.0);
+        }
+    }
+
+    return levels;
 }
 
 bool FindEffect(const QString& name, EffectDefinition* effect)
@@ -198,6 +266,56 @@ public:
 private:
     qreal width = CLIP_DEFAULT_WIDTH;
     QColor color = QColor("#888888");
+};
+
+class MusicSpectrumItem : public QGraphicsItem
+{
+public:
+    MusicSpectrumItem()
+    {
+        setAcceptedMouseButtons(Qt::NoButton);
+        setZValue(12.0);
+    }
+
+    QRectF boundingRect() const override
+    {
+        return QRectF(0.0, 0.0, width, height);
+    }
+
+    void SetSpectrum(const QVector<qreal>& new_levels, qreal new_width, qreal new_height)
+    {
+        prepareGeometryChange();
+        levels = new_levels;
+        width = new_width;
+        height = new_height;
+        update();
+    }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override
+    {
+        if(levels.empty() || width <= 0.0 || height <= 0.0)
+        {
+            return;
+        }
+
+        painter->setRenderHint(QPainter::Antialiasing, false);
+        painter->setPen(QPen(QColor(64, 188, 255, 92), 1.0));
+
+        const qreal center_y = height / 2.0;
+        const qreal step = width / levels.size();
+
+        for(int i = 0; i < levels.size(); i++)
+        {
+            const qreal x = i * step;
+            const qreal bar_height = qMax<qreal>(2.0, levels[i] * height * 0.42);
+            painter->drawLine(QPointF(x, center_y - bar_height), QPointF(x, center_y + bar_height));
+        }
+    }
+
+private:
+    QVector<qreal> levels;
+    qreal width = 0.0;
+    qreal height = 0.0;
 };
 
 class TimelineClipItem : public QGraphicsItem
@@ -404,6 +522,31 @@ public:
         RebuildLayout();
     }
 
+    void SetMusicSpectrum(const QVector<qreal>& spectrum, qint64 duration_ms)
+    {
+        music_spectrum = spectrum;
+        music_duration_ms = qMax<qint64>(0, duration_ms);
+        music_position_ms = 0;
+        RebuildLayout();
+    }
+
+    void SetMusicPosition(qint64 position_ms)
+    {
+        music_position_ms = qMax<qint64>(0, position_ms);
+
+        if(music_duration_ms > 0)
+        {
+            music_position_ms = qMin(music_position_ms, music_duration_ms);
+        }
+
+        UpdatePlayhead();
+    }
+
+    void SetMusicSeekCallback(std::function<void(qint64)> callback)
+    {
+        music_seek_callback = std::move(callback);
+    }
+
     qreal ContentWidth() const
     {
         return sceneRect().width();
@@ -459,6 +602,14 @@ protected:
         if(event->button() != Qt::LeftButton)
         {
             QGraphicsScene::mousePressEvent(event);
+            return;
+        }
+
+        if(IsPlayheadHandle(event->scenePos()))
+        {
+            drag_mode = PlayheadSeek;
+            SeekMusicAt(event->scenePos().x());
+            event->accept();
             return;
         }
 
@@ -521,11 +672,25 @@ protected:
             return;
         }
 
+        if(drag_mode == PlayheadSeek)
+        {
+            SeekMusicAt(event->scenePos().x());
+            event->accept();
+            return;
+        }
+
         QGraphicsScene::mouseMoveEvent(event);
     }
 
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override
     {
+        if(drag_mode == PlayheadSeek)
+        {
+            drag_mode = NoDrag;
+            event->accept();
+            return;
+        }
+
         if(drag_mode == ClipMove || drag_mode == ClipResize)
         {
             if(active_clip != nullptr)
@@ -549,7 +714,8 @@ private:
     {
         NoDrag,
         ClipMove,
-        ClipResize
+        ClipResize,
+        PlayheadSeek
     };
 
     template<typename ItemType>
@@ -575,6 +741,10 @@ private:
             delete preview;
             preview = nullptr;
         }
+
+        music_item = nullptr;
+        playhead_item = nullptr;
+        playhead_handle = nullptr;
     }
 
     void ClearClips()
@@ -594,8 +764,8 @@ private:
         lanes.clear();
 
         const int lane_count = qMax(1, lane_names.size());
-        const qreal content_height = lane_count * ROW_HEIGHT;
-        const qreal scene_width = qMax<qreal>(TIMELINE_MIN_WIDTH, viewport_size.width());
+        const qreal content_height = ROW_HEIGHT + lane_count * ROW_HEIGHT;
+        const qreal scene_width = qMax(qMax<qreal>(TIMELINE_MIN_WIDTH, viewport_size.width()), MusicPixelWidth());
         const qreal scene_height = qMax<qreal>(content_height, viewport_size.height());
 
         setSceneRect(0.0, 0.0, scene_width, scene_height);
@@ -603,7 +773,7 @@ private:
 
         if(lane_names.empty())
         {
-            AddText(empty_message, 12.0, 14.0, scene_width - 24.0, TextLineColor(palette, 160, 170), 10, false);
+            AddText(empty_message, 12.0, ROW_HEIGHT + 14.0, scene_width - 24.0, TextLineColor(palette, 160, 170), 10, false);
         }
         else
         {
@@ -613,6 +783,7 @@ private:
             }
         }
 
+        AddMusicItems();
         RelayoutClips();
     }
 
@@ -632,7 +803,7 @@ private:
 
     void DrawLane(int index, const QString& name)
     {
-        const qreal y = index * ROW_HEIGHT;
+        const qreal y = ROW_HEIGHT + index * ROW_HEIGHT;
         QColor row_color = (index % 2 == 0) ? palette.color(QPalette::Base) : palette.color(QPalette::AlternateBase);
 
         if(!row_color.isValid() || row_color == palette.color(QPalette::Base))
@@ -699,6 +870,94 @@ private:
     {
         const QRectF rect = lanes[lane].rect;
         return qBound(rect.left(), x, rect.right() - width);
+    }
+
+    qreal MusicPixelWidth() const
+    {
+        if(music_duration_ms <= 0)
+        {
+            return 0.0;
+        }
+
+        return music_duration_ms * GRID_WIDTH / 1000.0;
+    }
+
+    void AddMusicItems()
+    {
+        const qreal music_width = MusicPixelWidth();
+        const QRectF row_rect(0.0, 0.0, sceneRect().width(), ROW_HEIGHT);
+        QColor row_color = palette.color(QPalette::Window);
+
+        if(!row_color.isValid())
+        {
+            row_color = palette.color(QPalette::Base);
+        }
+
+        Track(addRect(row_rect, QPen(TextLineColor(palette, 52, 82)), QBrush(row_color)));
+
+        for(qreal x = GRID_WIDTH; x < row_rect.width(); x += GRID_WIDTH)
+        {
+            Track(addLine(x, 1.0, x, ROW_HEIGHT - 1.0, QPen(TextLineColor(palette, 24, 42))));
+        }
+
+        if(!music_spectrum.empty() && music_width > 0.0)
+        {
+            MusicSpectrumItem* item = new MusicSpectrumItem();
+            addItem(item);
+            Track(item);
+            item->SetSpectrum(music_spectrum, music_width, ROW_HEIGHT);
+            music_item = item;
+        }
+
+        if(music_duration_ms > 0)
+        {
+            playhead_item = Track(addLine(0.0, 0.0, 0.0, sceneRect().height(), QPen(QColor(255, 255, 255, 220), 2.0)));
+            playhead_item->setZValue(95.0);
+            playhead_handle = Track(addEllipse(-PLAYHEAD_HANDLE_RADIUS, ROW_HEIGHT / 2.0 - PLAYHEAD_HANDLE_RADIUS,
+                PLAYHEAD_HANDLE_RADIUS * 2.0, PLAYHEAD_HANDLE_RADIUS * 2.0,
+                QPen(QColor(255, 255, 255, 235), 2.0), QBrush(QColor(64, 188, 255))));
+            playhead_handle->setZValue(100.0);
+            UpdatePlayhead();
+        }
+    }
+
+    void UpdatePlayhead()
+    {
+        if(playhead_item == nullptr)
+        {
+            return;
+        }
+
+        const qreal x = qBound<qreal>(0.0, music_position_ms * GRID_WIDTH / 1000.0, sceneRect().right());
+        playhead_item->setLine(x, 0.0, x, sceneRect().height());
+
+        if(playhead_handle != nullptr)
+        {
+            playhead_handle->setRect(x - PLAYHEAD_HANDLE_RADIUS, ROW_HEIGHT / 2.0 - PLAYHEAD_HANDLE_RADIUS,
+                PLAYHEAD_HANDLE_RADIUS * 2.0, PLAYHEAD_HANDLE_RADIUS * 2.0);
+        }
+    }
+
+    bool IsPlayheadHandle(const QPointF& pos) const
+    {
+        return music_duration_ms > 0 && playhead_handle != nullptr
+            && playhead_handle->rect().adjusted(-4.0, -4.0, 4.0, 4.0).contains(pos);
+    }
+
+    void SeekMusicAt(qreal x)
+    {
+        if(music_duration_ms <= 0)
+        {
+            return;
+        }
+
+        const qint64 position_ms = qBound<qint64>(0, static_cast<qint64>(x * 1000.0 / GRID_WIDTH), music_duration_ms);
+        SetMusicPosition(position_ms);
+
+        if(music_seek_callback)
+        {
+            music_seek_callback(position_ms);
+        }
     }
 
     void UpdateClipMove(const QPointF& pos)
@@ -809,6 +1068,10 @@ private:
     QVector<QGraphicsItem*> layout_items;
     QVector<TimelineClipItem*> clips;
     QString empty_message;
+    QVector<qreal> music_spectrum;
+    std::function<void(qint64)> music_seek_callback;
+    qint64 music_duration_ms = 0;
+    qint64 music_position_ms = 0;
 
     DragMode drag_mode = NoDrag;
     QPointF drag_offset;
@@ -819,6 +1082,9 @@ private:
     qreal last_preview_x = 0.0;
     TimelineClipItem* active_clip = nullptr;
     ClipPreviewItem* preview = nullptr;
+    MusicSpectrumItem* music_item = nullptr;
+    QGraphicsLineItem* playhead_item = nullptr;
+    QGraphicsEllipseItem* playhead_handle = nullptr;
 };
 
 class TimelineRulerWidget : public QWidget
@@ -906,6 +1172,12 @@ public:
     void SetLanes(const QVector<QString>& lanes)
     {
         clear();
+
+        QListWidgetItem* music_item = new QListWidgetItem("Music");
+        music_item->setFlags(Qt::ItemIsEnabled);
+        music_item->setSizeHint(QSize(0, static_cast<int>(ROW_HEIGHT)));
+        music_item->setToolTip("Music");
+        addItem(music_item);
 
         for(const QString& lane : lanes)
         {
@@ -999,6 +1271,22 @@ public:
     {
         light_scene->SetLanes(lanes, empty_text);
         SyncRuler();
+    }
+
+    void SetMusicSpectrum(const QVector<qreal>& spectrum, qint64 duration_ms)
+    {
+        light_scene->SetMusicSpectrum(spectrum, duration_ms);
+        SyncRuler();
+    }
+
+    void SetMusicPosition(qint64 position_ms)
+    {
+        light_scene->SetMusicPosition(position_ms);
+    }
+
+    void SetMusicSeekCallback(std::function<void(qint64)> callback)
+    {
+        light_scene->SetMusicSeekCallback(std::move(callback));
     }
 
 protected:
@@ -1098,7 +1386,13 @@ public:
         ruler = new TimelineRulerWidget(this);
         view = new LightTrackView(this);
         effects_list = new EffectsListWidget(this);
+        music_timer = new QTimer(this);
+        music_timer->setInterval(33);
         view->SetRuler(ruler);
+        view->SetMusicSeekCallback([this](qint64 position_ms)
+        {
+            SeekMusic(position_ms);
+        });
 
         QWidget* left_column = new QWidget(this);
         QVBoxLayout* left_layout = new QVBoxLayout(left_column);
@@ -1114,8 +1408,22 @@ public:
         QVBoxLayout* center_layout = new QVBoxLayout(center_column);
         center_layout->setContentsMargins(0, 0, 0, 0);
         center_layout->setSpacing(0);
-        QLabel* timeline_header = HeaderLabel("Timeline", center_column);
+        QWidget* timeline_header = new QWidget(center_column);
         timeline_header->setFixedHeight(static_cast<int>(HEADER_HEIGHT));
+        QHBoxLayout* timeline_header_layout = new QHBoxLayout(timeline_header);
+        timeline_header_layout->setContentsMargins(0, 0, 0, 0);
+        timeline_header_layout->setSpacing(6);
+        QLabel* timeline_title = HeaderLabel("Timeline", timeline_header);
+        music_label = new QLabel("No music", timeline_header);
+        music_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        music_label->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
+        choose_music_button = new QPushButton("Music...", timeline_header);
+        play_button = new QPushButton("Play", timeline_header);
+        play_button->setEnabled(false);
+        timeline_header_layout->addWidget(timeline_title);
+        timeline_header_layout->addWidget(music_label, 1);
+        timeline_header_layout->addWidget(choose_music_button);
+        timeline_header_layout->addWidget(play_button);
         center_layout->addWidget(timeline_header);
         center_layout->addWidget(ruler);
         center_layout->addWidget(view);
@@ -1136,8 +1444,25 @@ public:
 
         connect(view->verticalScrollBar(), &QScrollBar::valueChanged, lane_list->verticalScrollBar(), &QScrollBar::setValue);
         connect(lane_list->verticalScrollBar(), &QScrollBar::valueChanged, view->verticalScrollBar(), &QScrollBar::setValue);
+        connect(choose_music_button, &QPushButton::clicked, this, [this]()
+        {
+            ChooseMusic();
+        });
+        connect(play_button, &QPushButton::clicked, this, [this]()
+        {
+            ToggleMusicPlayback();
+        });
+        connect(music_timer, &QTimer::timeout, this, [this]()
+        {
+            UpdateMusicPosition();
+        });
 
         ReloadDevices();
+    }
+
+    ~LightTrackPage() override
+    {
+        CloseMusic();
     }
 
     void ReloadDevices()
@@ -1188,6 +1513,215 @@ public:
     }
 
 private:
+    void ChooseMusic()
+    {
+        const QString path = QFileDialog::getOpenFileName(this, "Select music", QString(),
+            "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a *.aac);;All Files (*.*)");
+
+        if(path.isEmpty())
+        {
+            return;
+        }
+
+        CloseMusic();
+        music_path = path;
+        play_button->setText("Play");
+        play_button->setEnabled(false);
+        view->SetMusicPosition(0);
+
+        const QFileInfo file_info(path);
+        const QVector<qreal> spectrum = BuildMusicSpectrumPreview(path);
+        music_label->setText(file_info.fileName());
+        music_label->setToolTip(path);
+
+        if(!OpenMusic(path))
+        {
+            music_label->setText(file_info.fileName() + " (cannot play)");
+            view->SetMusicSpectrum(spectrum, 0);
+            return;
+        }
+
+        view->SetMusicSpectrum(spectrum, music_duration_ms);
+        play_button->setEnabled(true);
+    }
+
+    bool OpenMusic(const QString& path)
+    {
+#ifdef _WIN32
+        music_alias = QString("lighttrack_music_%1").arg(reinterpret_cast<quintptr>(this), 0, 16);
+        QString native_path = QDir::toNativeSeparators(path);
+        native_path.remove('"');
+
+        if(!Mci(QString("open \"%1\" alias %2").arg(native_path, music_alias)))
+        {
+            music_alias.clear();
+            return false;
+        }
+
+        Mci(QString("set %1 time format milliseconds").arg(music_alias));
+        music_duration_ms = MciNumber(QString("status %1 length").arg(music_alias));
+
+        if(music_duration_ms <= 0)
+        {
+            CloseMusic();
+            return false;
+        }
+
+        music_loaded = true;
+        return true;
+#else
+        Q_UNUSED(path);
+        music_duration_ms = 0;
+        music_loaded = false;
+        return false;
+#endif
+    }
+
+    void ToggleMusicPlayback()
+    {
+        if(!music_loaded)
+        {
+            return;
+        }
+
+#ifdef _WIN32
+        if(music_playing)
+        {
+            Mci(QString("pause %1").arg(music_alias));
+            music_timer->stop();
+            music_playing = false;
+            play_button->setText("Play");
+            UpdateMusicPosition();
+            return;
+        }
+
+        if(music_duration_ms > 0 && MusicPosition() >= music_duration_ms - 20)
+        {
+            Mci(QString("seek %1 to start").arg(music_alias));
+            view->SetMusicPosition(0);
+        }
+
+        if(Mci(QString("play %1").arg(music_alias)))
+        {
+            music_timer->start();
+            music_playing = true;
+            play_button->setText("Pause");
+        }
+#endif
+    }
+
+    void SeekMusic(qint64 position_ms)
+    {
+        if(!music_loaded)
+        {
+            return;
+        }
+
+#ifdef _WIN32
+        const qint64 clamped_position = qBound<qint64>(0, position_ms, music_duration_ms);
+        Mci(QString("seek %1 to %2").arg(music_alias).arg(clamped_position));
+
+        if(music_playing)
+        {
+            Mci(QString("play %1").arg(music_alias));
+        }
+
+        view->SetMusicPosition(clamped_position);
+#else
+        Q_UNUSED(position_ms);
+#endif
+    }
+
+    void UpdateMusicPosition()
+    {
+        if(!music_loaded)
+        {
+            return;
+        }
+
+#ifdef _WIN32
+        qint64 position = MusicPosition();
+        const bool finished = music_playing && MciText(QString("status %1 mode").arg(music_alias)) == "stopped";
+
+        if(finished || (music_duration_ms > 0 && position >= music_duration_ms))
+        {
+            position = music_duration_ms;
+            music_timer->stop();
+            music_playing = false;
+            play_button->setText("Play");
+        }
+
+        view->SetMusicPosition(position);
+#endif
+    }
+
+    void CloseMusic()
+    {
+        if(music_timer != nullptr)
+        {
+            music_timer->stop();
+        }
+
+#ifdef _WIN32
+        if(!music_alias.isEmpty())
+        {
+            Mci(QString("stop %1").arg(music_alias));
+            Mci(QString("close %1").arg(music_alias));
+        }
+#endif
+
+        music_alias.clear();
+        music_loaded = false;
+        music_playing = false;
+        music_duration_ms = 0;
+
+        if(play_button != nullptr)
+        {
+            play_button->setText("Play");
+            play_button->setEnabled(false);
+        }
+    }
+
+#ifdef _WIN32
+    bool Mci(const QString& command, QString* result = nullptr) const
+    {
+        wchar_t buffer[256] = {};
+        const MCIERROR error = mciSendStringW(reinterpret_cast<LPCWSTR>(command.utf16()),
+            result == nullptr ? nullptr : buffer, result == nullptr ? 0 : 256, nullptr);
+
+        if(error != 0)
+        {
+            return false;
+        }
+
+        if(result != nullptr)
+        {
+            *result = QString::fromWCharArray(buffer).trimmed();
+        }
+
+        return true;
+    }
+
+    QString MciText(const QString& command) const
+    {
+        QString result;
+        Mci(command, &result);
+        return result;
+    }
+
+    qint64 MciNumber(const QString& command) const
+    {
+        bool ok = false;
+        const qint64 value = MciText(command).toLongLong(&ok);
+        return ok ? value : 0;
+    }
+
+    qint64 MusicPosition() const
+    {
+        return MciNumber(QString("status %1 position").arg(music_alias));
+    }
+#endif
+
     void SetLanes(const QVector<QString>& lanes, const QString& empty_message)
     {
         lane_list->SetLanes(lanes);
@@ -1199,6 +1733,15 @@ private:
     TimelineRulerWidget* ruler;
     LightTrackView* view;
     EffectsListWidget* effects_list;
+    QPushButton* choose_music_button = nullptr;
+    QPushButton* play_button = nullptr;
+    QLabel* music_label = nullptr;
+    QTimer* music_timer = nullptr;
+    QString music_path;
+    QString music_alias;
+    qint64 music_duration_ms = 0;
+    bool music_loaded = false;
+    bool music_playing = false;
 };
 }
 

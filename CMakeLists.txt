@@ -21,3 +21,7 @@ target_include_directories(LightTrackPlugin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB/i2c_smbus
 )
 target_link_libraries(LightTrackPlugin PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+
+if(WIN32)
+  target_link_libraries(LightTrackPlugin PRIVATE winmm)
+endif()
