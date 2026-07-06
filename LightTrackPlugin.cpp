@@ -21,11 +21,9 @@
 #include <QGraphicsItem>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsLineItem>
-#include <QGraphicsRectItem>
 #include <QGraphicsScene>
 #include <QGraphicsSceneHoverEvent>
 #include <QGraphicsSceneMouseEvent>
-#include <QGraphicsTextItem>
 #include <QGraphicsView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -674,6 +672,52 @@ public:
     }
 
 protected:
+    void drawBackground(QPainter* painter, const QRectF& rect) override
+    {
+        painter->setRenderHint(QPainter::Antialiasing, false);
+        painter->fillRect(rect, palette.color(QPalette::Base));
+
+        QColor music_row_color = palette.color(QPalette::Window);
+        if(!music_row_color.isValid())
+        {
+            music_row_color = palette.color(QPalette::Base);
+        }
+
+        PaintRow(painter, QRectF(0.0, 0.0, sceneRect().width(), ROW_HEIGHT),
+            music_row_color, TextLineColor(palette, 52, 82), TextLineColor(palette, 24, 42), rect);
+
+        if(lane_names.empty())
+        {
+            if(!empty_message.isEmpty())
+            {
+                QFont font;
+                font.setPointSize(10);
+                painter->setRenderHint(QPainter::TextAntialiasing, true);
+                painter->setFont(font);
+                painter->setPen(TextLineColor(palette, 160, 170));
+                painter->drawText(QRectF(12.0, ROW_HEIGHT + 14.0, sceneRect().width() - 24.0, ROW_HEIGHT),
+                    Qt::AlignLeft | Qt::AlignTop, empty_message);
+            }
+            return;
+        }
+
+        const int first_lane = qMax(0, static_cast<int>(std::floor((rect.top() - ROW_HEIGHT) / ROW_HEIGHT)));
+        const int last_lane = qMin(lane_names.size() - 1, static_cast<int>(std::floor((rect.bottom() - ROW_HEIGHT) / ROW_HEIGHT)));
+
+        for(int i = first_lane; i <= last_lane; i++)
+        {
+            QColor row_color = (i % 2 == 0) ? palette.color(QPalette::Base) : palette.color(QPalette::AlternateBase);
+
+            if(!row_color.isValid() || row_color == palette.color(QPalette::Base))
+            {
+                row_color = (i % 2 == 0) ? palette.color(QPalette::Base) : palette.color(QPalette::Window);
+            }
+
+            PaintRow(painter, QRectF(0.0, ROW_HEIGHT + i * ROW_HEIGHT, sceneRect().width(), ROW_HEIGHT),
+                row_color, TextLineColor(palette, 38, 72), TextLineColor(palette, 20, 38), rect);
+        }
+    }
+
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override
     {
         if(event->button() != Qt::LeftButton)
@@ -846,57 +890,41 @@ private:
         const qreal scene_height = qMax<qreal>(content_height, viewport_size.height());
 
         setSceneRect(0.0, 0.0, scene_width, scene_height);
-        Track(addRect(sceneRect(), Qt::NoPen, QBrush(palette.color(QPalette::Base))));
 
-        if(lane_names.empty())
+        for(int i = 0; i < lane_names.size(); i++)
         {
-            AddText(empty_message, 12.0, ROW_HEIGHT + 14.0, scene_width - 24.0, TextLineColor(palette, 160, 170), 10, false);
-        }
-        else
-        {
-            for(int i = 0; i < lane_names.size(); i++)
-            {
-                DrawLane(i, lane_names[i]);
-            }
+            lanes.push_back({lane_names[i], QRectF(0.0, ROW_HEIGHT + i * ROW_HEIGHT, scene_width, ROW_HEIGHT)});
         }
 
+        invalidate(sceneRect(), QGraphicsScene::BackgroundLayer);
         AddMusicItems();
         RelayoutClips();
     }
 
-    QGraphicsTextItem* AddText(const QString& text, qreal x, qreal y, qreal width, const QColor& color, int point_size, bool bold)
+    void PaintRow(QPainter* painter, const QRectF& row_rect, const QColor& fill, const QColor& border,
+        const QColor& grid, const QRectF& exposed) const
     {
-        QFont font;
-        font.setPointSize(point_size);
-        font.setBold(bold);
-
-        QGraphicsTextItem* item = addText(text, font);
-        item->setDefaultTextColor(color);
-        item->setTextWidth(width);
-        item->setPos(x, y);
-        item->setZValue(5.0);
-        return Track(item);
-    }
-
-    void DrawLane(int index, const QString& name)
-    {
-        const qreal y = ROW_HEIGHT + index * ROW_HEIGHT;
-        QColor row_color = (index % 2 == 0) ? palette.color(QPalette::Base) : palette.color(QPalette::AlternateBase);
-
-        if(!row_color.isValid() || row_color == palette.color(QPalette::Base))
+        if(!row_rect.intersects(exposed))
         {
-            row_color = (index % 2 == 0) ? palette.color(QPalette::Base) : palette.color(QPalette::Window);
+            return;
         }
 
-        const QRectF lane_rect(0.0, y, sceneRect().width(), ROW_HEIGHT);
-        Track(addRect(lane_rect, QPen(TextLineColor(palette, 38, 72)), QBrush(row_color)));
+        painter->fillRect(row_rect.intersected(exposed), fill);
+        painter->setPen(QPen(border));
+        painter->drawRect(row_rect.adjusted(0.0, 0.0, -0.5, -0.5));
 
-        for(qreal x = pixels_per_second; x < lane_rect.width(); x += pixels_per_second)
+        if(pixels_per_second <= 0.0)
         {
-            Track(addLine(x, y + 1.0, x, y + ROW_HEIGHT - 1.0, QPen(TextLineColor(palette, 20, 38))));
+            return;
         }
 
-        lanes.push_back({name, lane_rect});
+        painter->setPen(QPen(grid));
+        const qreal first_x = std::ceil(qMax(pixels_per_second, exposed.left()) / pixels_per_second) * pixels_per_second;
+
+        for(qreal x = first_x; x < row_rect.right() && x <= exposed.right(); x += pixels_per_second)
+        {
+            painter->drawLine(QPointF(x, row_rect.top() + 1.0), QPointF(x, row_rect.bottom() - 1.0));
+        }
     }
 
     void RelayoutClips()
@@ -962,20 +990,6 @@ private:
     void AddMusicItems()
     {
         const qreal music_width = MusicPixelWidth();
-        const QRectF row_rect(0.0, 0.0, sceneRect().width(), ROW_HEIGHT);
-        QColor row_color = palette.color(QPalette::Window);
-
-        if(!row_color.isValid())
-        {
-            row_color = palette.color(QPalette::Base);
-        }
-
-        Track(addRect(row_rect, QPen(TextLineColor(palette, 52, 82)), QBrush(row_color)));
-
-        for(qreal x = pixels_per_second; x < row_rect.width(); x += pixels_per_second)
-        {
-            Track(addLine(x, 1.0, x, ROW_HEIGHT - 1.0, QPen(TextLineColor(palette, 24, 42))));
-        }
 
         if(!music_spectrum.empty() && music_width > 0.0)
         {
@@ -1341,7 +1355,8 @@ public:
         setAlignment(Qt::AlignLeft | Qt::AlignTop);
         setDragMode(QGraphicsView::NoDrag);
         setFrameShape(QFrame::NoFrame);
-        setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
+        setRenderHints(QPainter::TextAntialiasing);
+        setCacheMode(QGraphicsView::CacheBackground);
         setViewportUpdateMode(QGraphicsView::BoundingRectViewportUpdate);
 
         light_scene->SetPalette(palette());
