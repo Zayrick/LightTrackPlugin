@@ -225,21 +225,6 @@ bool FindEffect(const QString& name, EffectDefinition* effect)
     return false;
 }
 
-QString ZoneTypeName(zone_type type)
-{
-    if(type == ZONE_TYPE_MATRIX)
-    {
-        return "matrix";
-    }
-
-    if(type == ZONE_TYPE_LINEAR)
-    {
-        return "linear";
-    }
-
-    return "single";
-}
-
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 QPoint EventPosition(const QDropEvent* event)
 {
@@ -1630,17 +1615,12 @@ public:
             for(int zone_idx = 0; zone_idx < static_cast<int>(controller->zones.size()); zone_idx++)
             {
                 const zone& zone_ref = controller->zones[zone_idx];
-                lanes.push_back(QString("%1 (%2, %3 LEDs)")
-                    .arg(QString::fromStdString(zone_ref.name))
-                    .arg(ZoneTypeName(zone_ref.type))
-                    .arg(zone_ref.leds_count));
+                lanes.push_back(QString::fromStdString(zone_ref.name));
 
                 for(int segment_idx = 0; segment_idx < static_cast<int>(zone_ref.segments.size()); segment_idx++)
                 {
                     const segment& segment_ref = zone_ref.segments[segment_idx];
-                    lanes.push_back(QString("%1 (%2 LEDs)")
-                        .arg(QString::fromStdString(segment_ref.name))
-                        .arg(segment_ref.leds_count));
+                    lanes.push_back(QString::fromStdString(segment_ref.name));
                 }
             }
         }
