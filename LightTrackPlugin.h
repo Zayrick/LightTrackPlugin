@@ -1,12 +1,19 @@
-#ifndef LIGHTTRACKPLUGIN_H
-#define LIGHTTRACKPLUGIN_H
+#pragma once
 
-#include "LightTrackPlugin_global.h"
+#include <QObject>
+#include "OpenRGBPluginInterface.h"
 
-class LIGHTTRACKPLUGIN_EXPORT LightTrackPlugin
+class LightTrackPlugin : public QObject, public OpenRGBPluginInterface
 {
-public:
-    LightTrackPlugin();
-};
+    Q_OBJECT
+    Q_PLUGIN_METADATA(IID OpenRGBPluginInterface_IID)
+    Q_INTERFACES(OpenRGBPluginInterface)
 
-#endif // LIGHTTRACKPLUGIN_H
+public:
+    OpenRGBPluginInfo GetPluginInfo() override;
+    unsigned int GetPluginAPIVersion() override;
+    void Load(ResourceManagerInterface* resource_manager_ptr) override;
+    QWidget* GetWidget() override;
+    QMenu* GetTrayMenu() override;
+    void Unload() override;
+};
