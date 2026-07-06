@@ -897,6 +897,7 @@ public:
         setAlternatingRowColors(true);
         setFrameShape(QFrame::NoFrame);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setSelectionMode(QAbstractItemView::NoSelection);
         setUniformItemSizes(true);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
