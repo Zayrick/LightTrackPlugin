@@ -15,7 +15,6 @@
 #include <QEvent>
 #include <QFont>
 #include <QFontMetrics>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -50,8 +49,13 @@
 #include <QWidget>
 #include <QDir>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
+#include <string>
+#include <vector>
+
+#include "miniaudio.h"
 
 #ifdef _WIN32
 #include <qt_windows.h>
@@ -117,8 +121,48 @@ QColor TextLineColor(const QPalette& palette, int light_alpha, int dark_alpha)
 
 QVector<qreal> BuildMusicSpectrumPreview(const QString& path)
 {
-    QFile file(path);
-    if(!file.open(QIODevice::ReadOnly) || file.size() <= 0)
+    ma_decoder_config config = ma_decoder_config_init(ma_format_f32, 1, 0);
+    ma_decoder decoder;
+
+#ifdef _WIN32
+    const std::wstring decoder_path = QDir::toNativeSeparators(path).toStdWString();
+    const ma_result init_result = ma_decoder_init_file_w(decoder_path.c_str(), &config, &decoder);
+#else
+    const QByteArray decoder_path = path.toLocal8Bit();
+    const ma_result init_result = ma_decoder_init_file(decoder_path.constData(), &config, &decoder);
+#endif
+
+    if(init_result != MA_SUCCESS)
+    {
+        return {};
+    }
+
+    QVector<float> samples;
+    QVector<float> chunk(4096);
+
+    // ponytail: one-shot decode is enough for normal songs; stream bins if very long tracks matter.
+    for(;;)
+    {
+        ma_uint64 frames_read = 0;
+        const ma_result read_result = ma_decoder_read_pcm_frames(&decoder, chunk.data(), static_cast<ma_uint64>(chunk.size()), &frames_read);
+
+        if(frames_read > 0)
+        {
+            const int read_count = static_cast<int>(frames_read);
+            const int old_size = samples.size();
+            samples.resize(old_size + read_count);
+            std::copy(chunk.constData(), chunk.constData() + read_count, samples.data() + old_size);
+        }
+
+        if(frames_read == 0 || read_result != MA_SUCCESS)
+        {
+            break;
+        }
+    }
+
+    ma_decoder_uninit(&decoder);
+
+    if(samples.isEmpty())
     {
         return {};
     }
@@ -126,30 +170,28 @@ QVector<qreal> BuildMusicSpectrumPreview(const QString& path)
     QVector<qreal> levels;
     levels.reserve(MUSIC_SPECTRUM_BARS);
     qreal peak = 0.0;
-    const qint64 size = file.size();
+    const qint64 sample_count = samples.size();
 
-    // ponytail: compressed files use cheap byte-energy preview; use a decoder/FFT when exact spectrum matters.
     for(int i = 0; i < MUSIC_SPECTRUM_BARS; i++)
     {
-        const qint64 start = size * i / MUSIC_SPECTRUM_BARS;
-        const qint64 end = size * (i + 1) / MUSIC_SPECTRUM_BARS;
-        const qint64 length = qMin<qint64>(4096, end - start);
+        const qint64 start = sample_count * i / MUSIC_SPECTRUM_BARS;
+        const qint64 end = sample_count * (i + 1) / MUSIC_SPECTRUM_BARS;
 
-        if(length <= 0 || !file.seek(start))
+        if(end <= start)
         {
             levels.push_back(0.0);
             continue;
         }
 
-        const QByteArray bytes = file.read(length);
         qreal sum = 0.0;
 
-        for(char byte : bytes)
+        for(qint64 sample_idx = start; sample_idx < end; sample_idx++)
         {
-            sum += qAbs(static_cast<int>(static_cast<unsigned char>(byte)) - 128);
+            const qreal sample = samples[static_cast<int>(sample_idx)];
+            sum += sample * sample;
         }
 
-        const qreal level = bytes.isEmpty() ? 0.0 : std::sqrt(sum / (bytes.size() * 128.0));
+        const qreal level = std::sqrt(sum / (end - start));
         levels.push_back(level);
         peak = qMax(peak, level);
     }
@@ -1516,7 +1558,7 @@ private:
     void ChooseMusic()
     {
         const QString path = QFileDialog::getOpenFileName(this, "Select music", QString(),
-            "Audio Files (*.wav *.mp3 *.flac *.ogg *.m4a *.aac);;All Files (*.*)");
+            "Audio Files (*.wav *.mp3 *.flac *.ogg);;All Files (*.*)");
 
         if(path.isEmpty())
         {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(LightTrackPlugin LANGUAGES CXX)
+project(LightTrackPlugin LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,12 +13,15 @@ add_library(LightTrackPlugin SHARED
   LightTrackPlugin_global.h
   LightTrackPlugin.cpp
   LightTrackPlugin.h
+  third_party/miniaudio/miniaudio.c
 )
 
 target_compile_definitions(LightTrackPlugin PRIVATE LIGHTTRACKPLUGIN_LIBRARY)
+target_compile_definitions(LightTrackPlugin PRIVATE MA_NO_DEVICE_IO MA_NO_ENCODING)
 target_include_directories(LightTrackPlugin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB
   ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB/i2c_smbus
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio
 )
 target_link_libraries(LightTrackPlugin PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 
