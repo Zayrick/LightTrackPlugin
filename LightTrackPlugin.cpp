@@ -3,6 +3,7 @@
 #include "ResourceManagerInterface.h"
 #include "RGBController/RGBController.h"
 
+#include <QAbstractItemModel>
 #include <QAbstractItemView>
 #include <QBrush>
 #include <QByteArray>
@@ -40,7 +41,10 @@
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
+#include <QStyle>
+#include <QStyledItemDelegate>
 #include <QStyleOptionGraphicsItem>
+#include <QStyleOptionViewItem>
 #include <QTimer>
 #include <QTransform>
 #include <QVector>
@@ -97,6 +101,22 @@ struct LaneInfo
 {
     QString name;
     QRectF rect;
+};
+
+enum LaneListRole
+{
+    LaneLevelRole        = Qt::UserRole + 1,
+    LaneIsLastRole       = Qt::UserRole + 2,
+    LaneAncestorMaskRole = Qt::UserRole + 3,
+    LaneIsTreeRole       = Qt::UserRole + 4
+};
+
+struct LaneEntry
+{
+    QString name;
+    int level = 0;
+    bool is_last = true;
+    int ancestor_mask = 0;
 };
 
 QVector<EffectDefinition> EffectDefinitions()
@@ -1248,6 +1268,98 @@ private:
     int horizontal_offset = 0;
 };
 
+class LaneTreeDelegate : public QStyledItemDelegate
+{
+public:
+    explicit LaneTreeDelegate(QObject* parent = nullptr) :
+        QStyledItemDelegate(parent)
+    {
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QStyleOptionViewItem opt(option);
+        initStyleOption(&opt, index);
+
+        const QString text = opt.text;
+        const bool is_tree_item = index.data(LaneIsTreeRole).toBool();
+        const int level = is_tree_item ? qMax(0, index.data(LaneLevelRole).toInt()) : 0;
+        const bool is_last = index.data(LaneIsLastRole).toBool();
+        const int ancestor_mask = index.data(LaneAncestorMaskRole).toInt();
+        bool has_children = false;
+
+        if(is_tree_item && index.model() != nullptr && index.row() + 1 < index.model()->rowCount(index.parent()))
+        {
+            const QModelIndex next = index.model()->index(index.row() + 1, index.column(), index.parent());
+            has_children = next.data(LaneIsTreeRole).toBool() && next.data(LaneLevelRole).toInt() > level;
+        }
+
+        opt.text.clear();
+        if(opt.widget != nullptr)
+        {
+            opt.widget->style()->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
+        }
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, false);
+
+        const int left = opt.rect.left() + 13;
+        const int step = 18;
+        const int middle_y = opt.rect.center().y();
+        const QColor line_color = TextLineColor(opt.palette, 78, 106);
+
+        if(is_tree_item)
+        {
+            painter->setPen(QPen(line_color, 1));
+
+            for(int depth = 0; depth < level; depth++)
+            {
+                if((ancestor_mask & (1 << depth)) == 0)
+                {
+                    continue;
+                }
+
+                const int x = left + depth * step;
+                painter->drawLine(QPoint(x, opt.rect.top()), QPoint(x, opt.rect.bottom()));
+            }
+
+            if(level > 0)
+            {
+                const int branch_x = left + (level - 1) * step;
+                const int text_x = left + level * step + 8;
+                painter->drawLine(QPoint(branch_x, opt.rect.top()), QPoint(branch_x, middle_y));
+
+                if(!is_last)
+                {
+                    painter->drawLine(QPoint(branch_x, middle_y), QPoint(branch_x, opt.rect.bottom()));
+                }
+
+                painter->drawLine(QPoint(branch_x, middle_y), QPoint(text_x - 5, middle_y));
+            }
+
+            if(has_children)
+            {
+                const int child_branch_x = left + level * step;
+                painter->drawLine(QPoint(child_branch_x, middle_y), QPoint(child_branch_x, opt.rect.bottom()));
+            }
+        }
+
+        QFont font = opt.font;
+        if(is_tree_item && level == 0)
+        {
+            font.setBold(true);
+        }
+        painter->setFont(font);
+        painter->setPen(opt.palette.color(QPalette::Text));
+
+        const int text_left = is_tree_item ? left + level * step + 8 : opt.rect.left() + 10;
+        const QRect text_rect = opt.rect.adjusted(text_left - opt.rect.left(), 0, -8, 0);
+        const QString elided = QFontMetrics(font).elidedText(text, Qt::ElideRight, text_rect.width());
+        painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, elided);
+        painter->restore();
+    }
+};
+
 class LaneListWidget : public QListWidget
 {
 public:
@@ -1261,24 +1373,30 @@ public:
         setSelectionMode(QAbstractItemView::NoSelection);
         setUniformItemSizes(true);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        setItemDelegate(new LaneTreeDelegate(this));
     }
 
-    void SetLanes(const QVector<QString>& lanes)
+    void SetLanes(const QVector<LaneEntry>& lanes)
     {
         clear();
 
         QListWidgetItem* music_item = new QListWidgetItem("Music");
         music_item->setFlags(Qt::ItemIsEnabled);
+        music_item->setData(LaneIsTreeRole, false);
         music_item->setSizeHint(QSize(0, static_cast<int>(ROW_HEIGHT)));
         music_item->setToolTip("Music");
         addItem(music_item);
 
-        for(const QString& lane : lanes)
+        for(const LaneEntry& lane : lanes)
         {
-            QListWidgetItem* item = new QListWidgetItem(lane);
+            QListWidgetItem* item = new QListWidgetItem(lane.name);
             item->setFlags(Qt::ItemIsEnabled);
+            item->setData(LaneLevelRole, lane.level);
+            item->setData(LaneIsLastRole, lane.is_last);
+            item->setData(LaneAncestorMaskRole, lane.ancestor_mask);
+            item->setData(LaneIsTreeRole, true);
             item->setSizeHint(QSize(0, static_cast<int>(ROW_HEIGHT)));
-            item->setToolTip(lane);
+            item->setToolTip(lane.name);
             addItem(item);
         }
     }
@@ -1588,7 +1706,7 @@ public:
 
     void ReloadDevices()
     {
-        QVector<QString> lanes;
+        QVector<LaneEntry> lanes;
         QString empty_message;
 
         if(resource_manager == nullptr)
@@ -1610,17 +1728,20 @@ public:
         for(int controller_idx = 0; controller_idx < static_cast<int>(controllers.size()); controller_idx++)
         {
             RGBController* controller = controllers[controller_idx];
-            lanes.push_back(QString::fromStdString(controller->GetName()));
+            lanes.push_back({QString::fromStdString(controller->GetName()), 0, true, 0});
 
             for(int zone_idx = 0; zone_idx < static_cast<int>(controller->zones.size()); zone_idx++)
             {
                 const zone& zone_ref = controller->zones[zone_idx];
-                lanes.push_back(QString::fromStdString(zone_ref.name));
+                const bool is_last_zone = zone_idx == static_cast<int>(controller->zones.size()) - 1;
+                lanes.push_back({QString::fromStdString(zone_ref.name), 1, is_last_zone, 0});
 
                 for(int segment_idx = 0; segment_idx < static_cast<int>(zone_ref.segments.size()); segment_idx++)
                 {
                     const segment& segment_ref = zone_ref.segments[segment_idx];
-                    lanes.push_back(QString::fromStdString(segment_ref.name));
+                    const bool is_last_segment = segment_idx == static_cast<int>(zone_ref.segments.size()) - 1;
+                    const int ancestor_mask = is_last_zone ? 0 : 1;
+                    lanes.push_back({QString::fromStdString(segment_ref.name), 2, is_last_segment, ancestor_mask});
                 }
             }
         }
@@ -1838,10 +1959,18 @@ private:
     }
 #endif
 
-    void SetLanes(const QVector<QString>& lanes, const QString& empty_message)
+    void SetLanes(const QVector<LaneEntry>& lanes, const QString& empty_message)
     {
         lane_list->SetLanes(lanes);
-        view->SetLanes(lanes, empty_message);
+
+        QVector<QString> lane_names;
+        lane_names.reserve(lanes.size());
+        for(const LaneEntry& lane : lanes)
+        {
+            lane_names.push_back(lane.name);
+        }
+
+        view->SetLanes(lane_names, empty_message);
     }
 
     ResourceManagerInterface* resource_manager;
