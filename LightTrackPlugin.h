@@ -3,6 +3,8 @@
 #include <QObject>
 #include "OpenRGBPluginInterface.h"
 
+class ResourceManagerInterface;
+
 class LightTrackPlugin : public QObject, public OpenRGBPluginInterface
 {
     Q_OBJECT
@@ -16,4 +18,10 @@ public:
     QWidget* GetWidget() override;
     QMenu* GetTrayMenu() override;
     void Unload() override;
+
+private:
+    static void DeviceListChangedCallback(void* ptr);
+
+    ResourceManagerInterface* resource_manager = nullptr;
+    QWidget* page = nullptr;
 };
