@@ -401,12 +401,12 @@ public:
         for(int controller_idx = 0; controller_idx < static_cast<int>(controllers.size()); controller_idx++)
         {
             RGBController* controller = controllers[controller_idx];
-            AddLane("Device: " + QString::fromStdString(controller->GetName()));
+            AddLane(QString::fromStdString(controller->GetName()));
 
             for(int zone_idx = 0; zone_idx < static_cast<int>(controller->zones.size()); zone_idx++)
             {
                 const zone& zone_ref = controller->zones[zone_idx];
-                AddLane(QString("  Zone: %1 (%2, %3 LEDs)")
+                AddLane(QString("%1 (%2, %3 LEDs)")
                     .arg(QString::fromStdString(zone_ref.name))
                     .arg(ZoneTypeName(zone_ref.type))
                     .arg(zone_ref.leds_count));
@@ -414,7 +414,7 @@ public:
                 for(int segment_idx = 0; segment_idx < static_cast<int>(zone_ref.segments.size()); segment_idx++)
                 {
                     const segment& segment_ref = zone_ref.segments[segment_idx];
-                    AddLane(QString("    Segment: %1 (%2 LEDs)")
+                    AddLane(QString("%1 (%2 LEDs)")
                         .arg(QString::fromStdString(segment_ref.name))
                         .arg(segment_ref.leds_count));
                 }
@@ -440,9 +440,7 @@ private:
         row_layout->setContentsMargins(0, 0, 0, 0);
         row_layout->setSpacing(6);
 
-        QLabel* label = new QLabel("Control Unit", row);
-        label->setFixedWidth(240);
-        row_layout->addWidget(label);
+        row_layout->addSpacing(240);
         row_layout->addWidget(new TimelineRuler(row), 1);
 
         lanes_layout->addWidget(row);
@@ -451,12 +449,16 @@ private:
     void AddLane(const QString& name)
     {
         QWidget* row = new QWidget(timeline_body);
+        row->setFixedHeight(52);
         QHBoxLayout* row_layout = new QHBoxLayout(row);
         row_layout->setContentsMargins(0, 0, 0, 0);
         row_layout->setSpacing(6);
 
         QLabel* label = new QLabel(name, row);
         label->setFixedWidth(240);
+        label->setFixedHeight(52);
+        label->setWordWrap(true);
+        label->setAlignment(Qt::AlignVCenter);
         label->setToolTip(name.trimmed());
         row_layout->addWidget(label);
 
