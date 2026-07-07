@@ -4,3 +4,6 @@
 [submodule "third_party/miniaudio"]
 	path = third_party/miniaudio
 	url = https://github.com/mackron/miniaudio.git
+[submodule "OpenRGBEffectsPlugin"]
+	path = OpenRGBEffectsPlugin
+	url = https://gitlab.com/OpenRGBDevelopers/OpenRGBEffectsPlugin.git
