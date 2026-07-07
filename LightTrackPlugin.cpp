@@ -4,6 +4,11 @@
 #include "LightTrackOpenRGBEffectsBridge.h"
 #include "ResourceManagerInterface.h"
 #include "RGBController/RGBController.h"
+#include "ControllerZone.h"
+#include "ColorUtils.h"
+#include "EffectListManager.h"
+#include "EffectManager.h"
+#include "OpenRGBEffectSettings.h"
 
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
@@ -58,6 +63,9 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -126,12 +134,32 @@ enum EffectListRole
     EffectExpandedRole = Qt::UserRole + 5
 };
 
+class TimelineClipItem;
+
 struct LaneEntry
 {
     QString name;
     int level = 0;
     bool is_last = true;
     int ancestor_mask = 0;
+    RGBController* controller = nullptr;
+    int zone_index = -1;
+    int segment_index = -1;
+};
+
+struct TimelineClipState
+{
+    const TimelineClipItem* clip = nullptr;
+    EffectDefinition effect;
+    int lane = -1;
+    qint64 start_ms = 0;
+    qint64 end_ms = 0;
+};
+
+struct RuntimeTarget
+{
+    int lane = -1;
+    ControllerZone* zone = nullptr;
 };
 
 QVector<EffectDefinition> EffectDefinitions()
@@ -661,6 +689,26 @@ public:
     qreal ContentWidth() const
     {
         return sceneRect().width();
+    }
+
+    QVector<TimelineClipState> TimelineClips() const
+    {
+        QVector<TimelineClipState> states;
+
+        if(pixels_per_second <= 0.0)
+        {
+            return states;
+        }
+
+        for(TimelineClipItem* clip : clips)
+        {
+            const qreal start_x = clip->pos().x();
+            states.push_back({clip, clip->Effect(), clip->LaneIndex(),
+                qMax<qint64>(0, static_cast<qint64>(std::floor(start_x * 1000.0 / pixels_per_second))),
+                qMax<qint64>(0, static_cast<qint64>(std::ceil((start_x + clip->ClipWidth()) * 1000.0 / pixels_per_second)))});
+        }
+
+        return states;
     }
 
     bool PreviewEffectAt(const QString& effect_name, const QPointF& pos)
@@ -1754,6 +1802,11 @@ public:
         light_scene->SetMusicPosition(position_ms);
     }
 
+    QVector<TimelineClipState> TimelineClips() const
+    {
+        return light_scene->TimelineClips();
+    }
+
     void SetMusicSeekCallback(std::function<void(qint64)> callback)
     {
         light_scene->SetMusicSeekCallback(std::move(callback));
@@ -1963,6 +2016,10 @@ public:
 
     void ReloadDevices()
     {
+        StopRuntime();
+        runtime_targets.clear();
+        runtime_zones.clear();
+
         QVector<LaneEntry> lanes;
         QString empty_message;
 
@@ -1985,20 +2042,29 @@ public:
         for(int controller_idx = 0; controller_idx < static_cast<int>(controllers.size()); controller_idx++)
         {
             RGBController* controller = controllers[controller_idx];
-            lanes.push_back({QString::fromStdString(controller->GetName()), 0, true, 0});
+            lanes.push_back({QString::fromStdString(controller->GetName()), 0, true, 0, controller, -1, -1});
 
             for(int zone_idx = 0; zone_idx < static_cast<int>(controller->zones.size()); zone_idx++)
             {
                 const zone& zone_ref = controller->zones[zone_idx];
                 const bool is_last_zone = zone_idx == static_cast<int>(controller->zones.size()) - 1;
-                lanes.push_back({QString::fromStdString(zone_ref.name), 1, is_last_zone, 0});
+                const int zone_lane = lanes.size();
+                lanes.push_back({QString::fromStdString(zone_ref.name), 1, is_last_zone, 0, controller, zone_idx, -1});
+
+                if(zone_ref.segments.empty())
+                {
+                    AddRuntimeTarget(zone_lane, controller, zone_idx, -1);
+                    continue;
+                }
 
                 for(int segment_idx = 0; segment_idx < static_cast<int>(zone_ref.segments.size()); segment_idx++)
                 {
                     const segment& segment_ref = zone_ref.segments[segment_idx];
                     const bool is_last_segment = segment_idx == static_cast<int>(zone_ref.segments.size()) - 1;
                     const int ancestor_mask = is_last_zone ? 0 : 1;
-                    lanes.push_back({QString::fromStdString(segment_ref.name), 2, is_last_segment, ancestor_mask});
+                    const int segment_lane = lanes.size();
+                    lanes.push_back({QString::fromStdString(segment_ref.name), 2, is_last_segment, ancestor_mask, controller, zone_idx, segment_idx});
+                    AddRuntimeTarget(segment_lane, controller, zone_idx, segment_idx);
                 }
             }
         }
@@ -2007,6 +2073,305 @@ public:
     }
 
 private:
+    void AddRuntimeTarget(int lane, RGBController* controller, int zone_idx, int segment_idx)
+    {
+        runtime_zones.push_back(std::make_unique<ControllerZone>(controller, static_cast<unsigned int>(zone_idx), false, 100, segment_idx >= 0, segment_idx));
+        runtime_targets.push_back({lane, runtime_zones.back().get()});
+    }
+
+    std::vector<ControllerZone*> AllRuntimeZones() const
+    {
+        std::vector<ControllerZone*> zones;
+        zones.reserve(runtime_targets.size());
+
+        for(const RuntimeTarget& target : runtime_targets)
+        {
+            if(target.zone != nullptr)
+            {
+                zones.push_back(target.zone);
+            }
+        }
+
+        return zones;
+    }
+
+    void ForceDirectMode(RGBController* controller) const
+    {
+        if(controller == nullptr)
+        {
+            return;
+        }
+
+        for(unsigned int i = 0; i < controller->modes.size(); i++)
+        {
+            if(controller->modes[i].name == "Direct")
+            {
+                if(controller->GetMode() != static_cast<int>(i))
+                {
+                    controller->SetMode(i);
+                }
+                return;
+            }
+        }
+
+        controller->SetCustomMode();
+        controller->UpdateMode();
+    }
+
+    void SendBlackToTargets(const std::vector<ControllerZone*>& zones, bool force_mode) const
+    {
+        std::set<RGBController*> controllers;
+
+        for(ControllerZone* controller_zone : zones)
+        {
+            if(controller_zone == nullptr || controller_zone->controller == nullptr)
+            {
+                continue;
+            }
+
+            controller_zone->SetAllZoneLEDs(ColorUtils::OFF(), 100, 0, 0);
+            controllers.insert(controller_zone->controller);
+        }
+
+        for(RGBController* controller : controllers)
+        {
+            if(force_mode)
+            {
+                ForceDirectMode(controller);
+            }
+
+            controller->UpdateLEDs();
+        }
+    }
+
+    bool LaneCoversTarget(int lane, int target_lane) const
+    {
+        if(lane < 0 || target_lane < 0 || lane >= current_lanes.size() || target_lane >= current_lanes.size() || lane > target_lane)
+        {
+            return false;
+        }
+
+        if(lane == target_lane)
+        {
+            return true;
+        }
+
+        const int ancestor_level = current_lanes[lane].level;
+        if(current_lanes[target_lane].level <= ancestor_level)
+        {
+            return false;
+        }
+
+        for(int i = lane + 1; i <= target_lane; i++)
+        {
+            if(current_lanes[i].level <= ancestor_level)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    RGBEffect* CreateRuntimeEffect(const EffectDefinition& definition) const
+    {
+        std::function<RGBEffect*()> constructor = EffectListManager::get()->GetEffectConstructor(definition.id.toStdString());
+        if(!constructor)
+        {
+            return nullptr;
+        }
+
+        RGBEffect* effect = constructor();
+        if(effect == nullptr)
+        {
+            return nullptr;
+        }
+
+        effect->hide();
+        effect->SetFPS(OpenRGBEffectSettings::globalSettings.fps);
+        effect->SetBrightness(OpenRGBEffectSettings::globalSettings.brightness);
+        effect->SetTemperature(OpenRGBEffectSettings::globalSettings.temperature);
+        effect->SetTint(OpenRGBEffectSettings::globalSettings.tint);
+
+        std::vector<RGBColor> initial_colors;
+        for(unsigned int i = 0; i < effect->EffectDetails.UserColors; i++)
+        {
+            if(OpenRGBEffectSettings::globalSettings.use_prefered_colors && i < OpenRGBEffectSettings::globalSettings.prefered_colors.size())
+            {
+                initial_colors.push_back(OpenRGBEffectSettings::globalSettings.prefered_colors[i]);
+            }
+            else
+            {
+                initial_colors.push_back(ColorUtils::RandomRGBColor());
+            }
+        }
+
+        effect->SetUserColors(initial_colors);
+        effect->SetRandomColorsEnabled(OpenRGBEffectSettings::globalSettings.prefer_random);
+        return effect;
+    }
+
+    RGBEffect* EnsureRuntimeEffect(const TimelineClipState& clip)
+    {
+        auto found = runtime_effects.find(clip.clip);
+        if(found != runtime_effects.end())
+        {
+            return found->second;
+        }
+
+        RGBEffect* effect = CreateRuntimeEffect(clip.effect);
+        if(effect != nullptr)
+        {
+            runtime_effects[clip.clip] = effect;
+        }
+
+        return effect;
+    }
+
+    void DestroyRuntimeEffect(RGBEffect* effect) const
+    {
+        if(effect == nullptr)
+        {
+            return;
+        }
+
+        EffectManager* manager = EffectManager::Get();
+        if(manager->IsActive(effect))
+        {
+            manager->SetEffectUnActive(effect);
+        }
+
+        manager->RemoveMapping(effect);
+        delete effect;
+    }
+
+    void StartRuntime(qint64 position_ms)
+    {
+        if(runtime_running)
+        {
+            SyncRuntime(position_ms);
+            return;
+        }
+
+        runtime_running = true;
+        SendBlackToTargets(AllRuntimeZones(), true);
+        SyncRuntime(position_ms);
+    }
+
+    void StopRuntime()
+    {
+        const bool was_running = runtime_running || !runtime_effects.empty();
+
+        for(auto& runtime_effect : runtime_effects)
+        {
+            DestroyRuntimeEffect(runtime_effect.second);
+        }
+
+        runtime_effects.clear();
+        runtime_assignments.clear();
+        runtime_running = false;
+
+        if(was_running)
+        {
+            SendBlackToTargets(AllRuntimeZones(), true);
+        }
+    }
+
+    void SyncRuntime(qint64 position_ms)
+    {
+        if(!runtime_running)
+        {
+            return;
+        }
+
+        const QVector<TimelineClipState> clips = view->TimelineClips();
+        std::map<const TimelineClipItem*, TimelineClipState> assigned_clips;
+        std::map<const TimelineClipItem*, std::vector<ControllerZone*>> assignments;
+
+        for(const RuntimeTarget& target : runtime_targets)
+        {
+            if(target.zone == nullptr)
+            {
+                continue;
+            }
+
+            const TimelineClipState* best_clip = nullptr;
+            int best_level = -1;
+
+            for(const TimelineClipState& clip : clips)
+            {
+                if(clip.start_ms > position_ms || position_ms >= clip.end_ms || !LaneCoversTarget(clip.lane, target.lane))
+                {
+                    continue;
+                }
+
+                const int level = current_lanes[clip.lane].level;
+                if(level >= best_level)
+                {
+                    best_clip = &clip;
+                    best_level = level;
+                }
+            }
+
+            if(best_clip != nullptr)
+            {
+                assignments[best_clip->clip].push_back(target.zone);
+                assigned_clips[best_clip->clip] = *best_clip;
+            }
+        }
+
+        for(auto effect_it = runtime_effects.begin(); effect_it != runtime_effects.end();)
+        {
+            if(assignments.find(effect_it->first) == assignments.end())
+            {
+                DestroyRuntimeEffect(effect_it->second);
+                runtime_assignments.erase(effect_it->first);
+                effect_it = runtime_effects.erase(effect_it);
+            }
+            else
+            {
+                ++effect_it;
+            }
+        }
+
+        std::set<ControllerZone*> active_targets;
+        EffectManager* manager = EffectManager::Get();
+
+        for(auto& assignment : assignments)
+        {
+            RGBEffect* effect = EnsureRuntimeEffect(assigned_clips[assignment.first]);
+            if(effect == nullptr)
+            {
+                continue;
+            }
+
+            auto previous = runtime_assignments.find(assignment.first);
+            if(previous == runtime_assignments.end() || previous->second != assignment.second)
+            {
+                manager->Assign(assignment.second, effect);
+                runtime_assignments[assignment.first] = assignment.second;
+            }
+
+            if(!manager->IsActive(effect))
+            {
+                manager->SetEffectActive(effect);
+            }
+
+            active_targets.insert(assignment.second.begin(), assignment.second.end());
+        }
+
+        std::vector<ControllerZone*> inactive_targets;
+        for(const RuntimeTarget& target : runtime_targets)
+        {
+            if(target.zone != nullptr && active_targets.find(target.zone) == active_targets.end())
+            {
+                inactive_targets.push_back(target.zone);
+            }
+        }
+
+        SendBlackToTargets(inactive_targets, false);
+    }
+
     void ChooseMusic()
     {
         const QString path = QFileDialog::getOpenFileName(this, "Select music", QString(),
@@ -2100,6 +2465,7 @@ private:
             music_timer->start();
             music_playing = true;
             play_button->setText("Pause");
+            StartRuntime(MusicPosition());
         }
 #endif
     }
@@ -2121,6 +2487,11 @@ private:
         }
 
         view->SetMusicPosition(clamped_position);
+
+        if(music_playing)
+        {
+            StartRuntime(clamped_position);
+        }
 #else
         Q_UNUSED(position_ms);
 #endif
@@ -2146,11 +2517,21 @@ private:
         }
 
         view->SetMusicPosition(position);
+
+        if(music_playing)
+        {
+            SyncRuntime(position);
+        }
+        else
+        {
+            StopRuntime();
+        }
 #endif
     }
 
     void CloseMusic()
     {
+        StopRuntime();
         if(music_timer != nullptr)
         {
             music_timer->stop();
@@ -2218,6 +2599,7 @@ private:
 
     void SetLanes(const QVector<LaneEntry>& lanes, const QString& empty_message)
     {
+        current_lanes = lanes;
         lane_list->SetLanes(lanes);
         view->SetLanes(lanes, empty_message);
     }
@@ -2236,6 +2618,12 @@ private:
     qint64 music_duration_ms = 0;
     bool music_loaded = false;
     bool music_playing = false;
+    QVector<LaneEntry> current_lanes;
+    std::vector<std::unique_ptr<ControllerZone>> runtime_zones;
+    QVector<RuntimeTarget> runtime_targets;
+    std::map<const TimelineClipItem*, RGBEffect*> runtime_effects;
+    std::map<const TimelineClipItem*, std::vector<ControllerZone*>> runtime_assignments;
+    bool runtime_running = false;
 };
 }
 
