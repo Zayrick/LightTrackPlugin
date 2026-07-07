@@ -1,6 +1,7 @@
 #include "LightTrackPlugin.h"
 
 #include "LightTrackEffectCatalog.h"
+#include "LightTrackOpenRGBEffectsBridge.h"
 #include "ResourceManagerInterface.h"
 #include "RGBController/RGBController.h"
 
@@ -2257,6 +2258,7 @@ unsigned int LightTrackPlugin::GetPluginAPIVersion()
 void LightTrackPlugin::Load(ResourceManagerInterface* resource_manager_ptr)
 {
     resource_manager = resource_manager_ptr;
+    InitializeOpenRGBEffectsRuntime(resource_manager_ptr);
 }
 
 QWidget* LightTrackPlugin::GetWidget()
@@ -2297,6 +2299,7 @@ void LightTrackPlugin::Unload()
 
     page = nullptr;
     resource_manager = nullptr;
+    ShutdownOpenRGBEffectsRuntime();
 }
 
 void LightTrackPlugin::DeviceListChangedCallback(void* ptr)
