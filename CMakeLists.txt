@@ -14,10 +14,13 @@ add_library(LightTrackPlugin SHARED
   LightTrackPlugin.cpp
   LightTrackPlugin.h
   third_party/miniaudio/miniaudio.c
+  LightTrackEffectCatalog.h
+  LightTrackEffectCatalog.cpp
 )
 
 target_compile_definitions(LightTrackPlugin PRIVATE LIGHTTRACKPLUGIN_LIBRARY)
 target_compile_definitions(LightTrackPlugin PRIVATE MA_NO_DEVICE_IO MA_NO_ENCODING)
+target_compile_definitions(LightTrackPlugin PRIVATE LIGHTTRACK_EFFECTS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/OpenRGBEffectsPlugin/Effects")
 target_include_directories(LightTrackPlugin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB
   ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB/i2c_smbus

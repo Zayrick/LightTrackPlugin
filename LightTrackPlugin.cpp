@@ -1,5 +1,6 @@
 #include "LightTrackPlugin.h"
 
+#include "LightTrackEffectCatalog.h"
 #include "ResourceManagerInterface.h"
 #include "RGBController/RGBController.h"
 
@@ -32,6 +33,7 @@
 #include <QListWidgetItem>
 #include <QMetaObject>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QPen>
@@ -77,7 +79,7 @@ const qreal LABEL_WIDTH = 238.0;
 const qreal ROW_HEIGHT = 52.0;
 const qreal TIMELINE_MIN_WIDTH = 900.0;
 const qreal SIDE_PANEL_WIDTH = 178.0;
-const qreal CARD_HEIGHT = 42.0;
+const qreal EFFECT_ROW_HEIGHT = 28.0;
 const qreal CLIP_HEIGHT = 32.0;
 const qreal CLIP_MIN_WIDTH = 72.0;
 const qreal CLIP_DEFAULT_WIDTH = 130.0;
@@ -93,7 +95,9 @@ const int MUSIC_SPECTRUM_BARS = 1200;
 
 struct EffectDefinition
 {
+    QString id;
     QString name;
+    QString category;
     QColor color;
 };
 
@@ -112,6 +116,15 @@ enum LaneListRole
     LaneIsTreeRole       = Qt::UserRole + 4
 };
 
+enum EffectListRole
+{
+    EffectIdRole       = Qt::UserRole + 1,
+    EffectColorRole    = Qt::UserRole + 2,
+    EffectIsGroupRole  = Qt::UserRole + 3,
+    EffectGroupKeyRole = Qt::UserRole + 4,
+    EffectExpandedRole = Qt::UserRole + 5
+};
+
 struct LaneEntry
 {
     QString name;
@@ -123,11 +136,22 @@ struct LaneEntry
 QVector<EffectDefinition> EffectDefinitions()
 {
     QVector<EffectDefinition> effects;
-    effects.push_back({"Solid", QColor("#2f80ed")});
-    effects.push_back({"Fade", QColor("#27ae60")});
-    effects.push_back({"Wave", QColor("#f2994a")});
-    effects.push_back({"Blink", QColor("#eb5757")});
+    const QVector<LightTrackEffectGroup> groups = LoadOpenRGBEffectsCatalog();
+
+    for(const LightTrackEffectGroup& group : groups)
+    {
+        for(const LightTrackEffectInfo& effect : group.effects)
+        {
+            effects.push_back({effect.id, effect.name, group.name, effect.color});
+        }
+    }
+
     return effects;
+}
+
+QVector<LightTrackEffectGroup> EffectGroups()
+{
+    return LoadOpenRGBEffectsCatalog();
 }
 
 QColor WithAlpha(QColor color, int alpha)
@@ -229,21 +253,20 @@ QVector<qreal> BuildMusicSpectrumPreview(const QString& path)
     return levels;
 }
 
-bool FindEffect(const QString& name, EffectDefinition* effect)
+bool FindEffect(const QString& id, EffectDefinition* effect)
 {
-    for(const EffectDefinition& candidate : EffectDefinitions())
+    LightTrackEffectInfo exported_effect;
+    if(!FindOpenRGBEffect(id, &exported_effect))
     {
-        if(candidate.name == name)
-        {
-            if(effect != nullptr)
-            {
-                *effect = candidate;
-            }
-            return true;
-        }
+        return false;
     }
 
-    return false;
+    if(effect != nullptr)
+    {
+        *effect = {exported_effect.id, exported_effect.name, exported_effect.category, exported_effect.color};
+    }
+
+    return true;
 }
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
@@ -1504,6 +1527,85 @@ public:
     }
 };
 
+class EffectListDelegate : public QStyledItemDelegate
+{
+public:
+    explicit EffectListDelegate(QObject* parent = nullptr) :
+        QStyledItemDelegate(parent)
+    {
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QStyleOptionViewItem opt(option);
+        initStyleOption(&opt, index);
+
+        const bool is_group = index.data(EffectIsGroupRole).toBool();
+        const QString text = opt.text;
+        opt.text.clear();
+
+        if(opt.widget != nullptr)
+        {
+            opt.widget->style()->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
+        }
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+
+        if(is_group)
+        {
+            QFont font = opt.font;
+            font.setBold(true);
+            painter->setFont(font);
+            painter->setPen(opt.palette.color(QPalette::Text));
+
+            const bool expanded = index.data(EffectExpandedRole).toBool();
+            const QRect arrow_rect(opt.rect.left() + 8, opt.rect.top(), 14, opt.rect.height());
+            const QPoint center = arrow_rect.center();
+            QPolygon arrow;
+
+            if(expanded)
+            {
+                arrow << QPoint(center.x() - 4, center.y() - 2)
+                      << QPoint(center.x() + 4, center.y() - 2)
+                      << QPoint(center.x(), center.y() + 3);
+            }
+            else
+            {
+                arrow << QPoint(center.x() - 2, center.y() - 4)
+                      << QPoint(center.x() - 2, center.y() + 4)
+                      << QPoint(center.x() + 3, center.y());
+            }
+
+            painter->setBrush(opt.palette.color(QPalette::Text));
+            painter->setPen(Qt::NoPen);
+            painter->drawPolygon(arrow);
+
+            const QRect text_rect = opt.rect.adjusted(26, 0, -8, 0);
+            painter->setPen(opt.palette.color(QPalette::Text));
+            painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft,
+                QFontMetrics(font).elidedText(text, Qt::ElideRight, text_rect.width()));
+        }
+        else
+        {
+            const QColor dot_color = index.data(EffectColorRole).value<QColor>();
+            const int dot_size = 9;
+            const QRect dot_rect(opt.rect.left() + 13, opt.rect.center().y() - dot_size / 2, dot_size, dot_size);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(dot_color.isValid() ? dot_color : opt.palette.color(QPalette::Highlight));
+            painter->drawEllipse(dot_rect);
+
+            painter->setFont(opt.font);
+            painter->setPen(opt.palette.color(QPalette::Text));
+            const QRect text_rect = opt.rect.adjusted(30, 0, -8, 0);
+            painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft,
+                QFontMetrics(opt.font).elidedText(text, Qt::ElideRight, text_rect.width()));
+        }
+
+        painter->restore();
+    }
+};
+
 class EffectsListWidget : public QListWidget
 {
 public:
@@ -1514,37 +1616,89 @@ public:
         setFrameShape(QFrame::NoFrame);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setSelectionMode(QAbstractItemView::SingleSelection);
-        setSpacing(8);
+        setSpacing(0);
         setUniformItemSizes(true);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        setItemDelegate(new EffectListDelegate(this));
 
-        for(const EffectDefinition& effect : EffectDefinitions())
+        for(const LightTrackEffectGroup& group : EffectGroups())
         {
-            QListWidgetItem* item = new QListWidgetItem(effect.name);
-            item->setBackground(effect.color);
-            item->setData(Qt::UserRole, effect.name.toUtf8());
-            item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
-            item->setForeground(Qt::white);
-            item->setSizeHint(QSize(0, static_cast<int>(CARD_HEIGHT)));
-            addItem(item);
+            QListWidgetItem* group_item = new QListWidgetItem(group.name);
+            group_item->setFlags(Qt::ItemIsEnabled);
+            group_item->setData(EffectIsGroupRole, true);
+            group_item->setData(EffectGroupKeyRole, group.name);
+            group_item->setData(EffectExpandedRole, true);
+            group_item->setSizeHint(QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
+            group_item->setToolTip(group.name);
+            addItem(group_item);
+
+            for(const LightTrackEffectInfo& effect : group.effects)
+            {
+                QListWidgetItem* item = new QListWidgetItem(effect.name);
+                item->setData(EffectIdRole, effect.id.toUtf8());
+                item->setData(EffectColorRole, effect.color);
+                item->setData(EffectGroupKeyRole, group.name);
+                item->setToolTip(group.name + QStringLiteral(" / ") + effect.name);
+                item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
+                item->setSizeHint(QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
+                addItem(item);
+            }
         }
     }
 
 protected:
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        QListWidgetItem* item = itemAt(event->pos());
+        if(event->button() == Qt::LeftButton && item != nullptr && item->data(EffectIsGroupRole).toBool())
+        {
+            ToggleGroup(item);
+            event->accept();
+            return;
+        }
+
+        QListWidget::mousePressEvent(event);
+    }
+
     void startDrag(Qt::DropActions) override
     {
         QListWidgetItem* item = currentItem();
-        if(item == nullptr)
+        if(item == nullptr || item->data(EffectIsGroupRole).toBool())
         {
             return;
         }
 
         QMimeData* mime_data = new QMimeData();
-        mime_data->setData(EFFECT_MIME, item->data(Qt::UserRole).toByteArray());
+        mime_data->setData(EFFECT_MIME, item->data(EffectIdRole).toByteArray());
 
         QDrag* drag = new QDrag(this);
         drag->setMimeData(mime_data);
         drag->exec(Qt::CopyAction);
+    }
+
+private:
+    void ToggleGroup(QListWidgetItem* group_item)
+    {
+        const QString group_key = group_item->data(EffectGroupKeyRole).toString();
+        const bool expanded = !group_item->data(EffectExpandedRole).toBool();
+        group_item->setData(EffectExpandedRole, expanded);
+
+        const int group_row = this->row(group_item);
+        for(int item_row = group_row + 1; item_row < count(); item_row++)
+        {
+            QListWidgetItem* item = this->item(item_row);
+            if(item == nullptr || item->data(EffectIsGroupRole).toBool())
+            {
+                break;
+            }
+
+            if(item->data(EffectGroupKeyRole).toString() == group_key)
+            {
+                item->setHidden(!expanded);
+            }
+        }
+
+        viewport()->update();
     }
 };
 
