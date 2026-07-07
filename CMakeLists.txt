@@ -8,8 +8,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets OpenGL Multimedia)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets OpenGL Multimedia)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets OpenGL)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets OpenGL)
 if(QT_VERSION_MAJOR EQUAL 6)
   find_package(Qt6 REQUIRED COMPONENTS Core5Compat OpenGLWidgets)
 endif()
@@ -107,7 +107,7 @@ add_library(LightTrackPlugin SHARED
 )
 
 target_compile_definitions(LightTrackPlugin PRIVATE LIGHTTRACKPLUGIN_LIBRARY)
-target_compile_definitions(LightTrackPlugin PRIVATE MA_NO_DEVICE_IO MA_NO_ENCODING)
+target_compile_definitions(LightTrackPlugin PRIVATE MA_NO_ENCODING)
 target_compile_definitions(LightTrackPlugin PRIVATE SHADERS_README="https://gitlab.com/OpenRGBDevelopers/OpenRGBEffectsPlugin/-/blob/master/Effects/Shaders/README.md")
 set_target_properties(LightTrackPlugin PROPERTIES AUTOUIC_SEARCH_PATHS "${OPENRGB_EFFECT_UI_DIRS}")
 target_include_directories(LightTrackPlugin PRIVATE
@@ -131,7 +131,7 @@ target_include_directories(LightTrackPlugin PRIVATE
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/include
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/include/internal
 )
-target_link_libraries(LightTrackPlugin PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGL Qt${QT_VERSION_MAJOR}::Multimedia)
+target_link_libraries(LightTrackPlugin PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGL)
 if(QT_VERSION_MAJOR EQUAL 6)
   target_link_libraries(LightTrackPlugin PRIVATE Qt6::Core5Compat Qt6::OpenGLWidgets)
 endif()

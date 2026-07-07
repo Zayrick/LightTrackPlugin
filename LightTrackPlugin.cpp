@@ -35,7 +35,6 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
-#include <QMediaPlayer>
 #include <QMetaObject>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -54,16 +53,9 @@
 #include <QTransform>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
-#include <QUrl>
 #include <QVector>
 #include <QVBoxLayout>
 #include <QWidget>
-
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-#include <QAudioOutput>
-#else
-#include <QMediaContent>
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -1738,11 +1730,6 @@ public:
         ruler = new TimelineRulerWidget(this);
         view = new LightTrackView(this);
         effects_list = new EffectsListWidget(this);
-        music_player = new QMediaPlayer(this);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        music_audio_output = new QAudioOutput(this);
-        music_player->setAudioOutput(music_audio_output);
-#endif
         music_timer = new QTimer(this);
         music_timer->setInterval(33);
         view->SetRuler(ruler);
@@ -1823,41 +1810,16 @@ public:
         {
             UpdateMusicPosition();
         });
-        connect(music_player, &QMediaPlayer::durationChanged, this, [this](qint64 duration)
-        {
-            music_duration_ms = qMax<qint64>(0, duration);
-            view->SetMusicSpectrum(music_spectrum_preview, music_duration_ms);
-        });
-        connect(music_player, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus status)
-        {
-            if(status == QMediaPlayer::EndOfMedia)
-            {
-                FinishMusicPlayback();
-            }
-        });
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        connect(music_player, &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error error, const QString&)
-        {
-            if(error != QMediaPlayer::NoError)
-            {
-                MarkMusicError();
-            }
-        });
-#else
-        connect(music_player, QOverload<QMediaPlayer::Error>::of(&QMediaPlayer::error), this, [this](QMediaPlayer::Error error)
-        {
-            if(error != QMediaPlayer::NoError)
-            {
-                MarkMusicError();
-            }
-        });
-#endif
         ReloadDevices();
     }
 
     ~LightTrackPage() override
     {
         CloseMusic();
+        if(music_engine_ready)
+        {
+            ma_engine_uninit(&music_engine);
+        }
     }
 
     void ReloadDevices()
@@ -2255,15 +2217,45 @@ private:
             return false;
         }
 
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        music_player->setSource(QUrl::fromLocalFile(path));
+        if(!music_engine_ready)
+        {
+            music_engine_ready = ma_engine_init(nullptr, &music_engine) == MA_SUCCESS;
+            if(!music_engine_ready)
+            {
+                return false;
+            }
+        }
+
+        const ma_uint32 sound_flags = MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION;
+#ifdef _WIN32
+        const std::wstring sound_path = QDir::toNativeSeparators(path).toStdWString();
+        const ma_result init_result = ma_sound_init_from_file_w(&music_engine, sound_path.c_str(),
+            sound_flags, nullptr, nullptr, &music_sound);
 #else
-        music_player->setMedia(QMediaContent(QUrl::fromLocalFile(path)));
+        const QByteArray sound_path = path.toLocal8Bit();
+        const ma_result init_result = ma_sound_init_from_file(&music_engine, sound_path.constData(),
+            sound_flags, nullptr, nullptr, &music_sound);
 #endif
 
-        music_duration_ms = qMax<qint64>(0, music_player->duration());
+        if(init_result != MA_SUCCESS)
+        {
+            return false;
+        }
+
+        music_sound_ready = true;
+
+        float duration_seconds = 0.0f;
+        if(ma_sound_get_length_in_seconds(&music_sound, &duration_seconds) == MA_SUCCESS)
+        {
+            music_duration_ms = qMax<qint64>(0, static_cast<qint64>(duration_seconds * 1000.0f + 0.5f));
+        }
+        else
+        {
+            music_duration_ms = 0;
+        }
+
         music_loaded = true;
-        return music_player->error() == QMediaPlayer::NoError;
+        return true;
     }
 
     void ToggleMusicPlayback()
@@ -2275,7 +2267,7 @@ private:
 
         if(music_playing)
         {
-            music_player->pause();
+            ma_sound_stop(&music_sound);
             music_timer->stop();
             music_playing = false;
             play_button->setText("Play");
@@ -2283,17 +2275,22 @@ private:
             return;
         }
 
-        if(music_duration_ms > 0 && music_player->position() >= music_duration_ms - 20)
+        if(music_duration_ms > 0 && MusicPositionMs() >= music_duration_ms - 20)
         {
-            music_player->setPosition(0);
+            ma_sound_seek_to_pcm_frame(&music_sound, 0);
             view->SetMusicPosition(0);
         }
 
-        music_player->play();
+        if(ma_sound_start(&music_sound) != MA_SUCCESS)
+        {
+            MarkMusicError();
+            return;
+        }
+
         music_timer->start();
         music_playing = true;
         play_button->setText("Pause");
-        StartRuntime(music_player->position());
+        StartRuntime(MusicPositionMs());
     }
 
     void SeekMusic(qint64 position_ms)
@@ -2307,7 +2304,12 @@ private:
             qBound<qint64>(0, position_ms, music_duration_ms) :
             qMax<qint64>(0, position_ms);
 
-        music_player->setPosition(clamped_position);
+        if(ma_sound_seek_to_second(&music_sound, static_cast<float>(clamped_position) / 1000.0f) != MA_SUCCESS)
+        {
+            MarkMusicError();
+            return;
+        }
+
         view->SetMusicPosition(clamped_position);
 
         if(music_playing)
@@ -2323,7 +2325,13 @@ private:
             return;
         }
 
-        qint64 position = music_player->position();
+        if(music_playing && ma_sound_at_end(&music_sound))
+        {
+            FinishMusicPlayback();
+            return;
+        }
+
+        const qint64 position = MusicPositionMs();
 
         if(music_duration_ms > 0 && position >= music_duration_ms)
         {
@@ -2343,6 +2351,22 @@ private:
         }
     }
 
+    qint64 MusicPositionMs() const
+    {
+        if(!music_sound_ready)
+        {
+            return 0;
+        }
+
+        float position_seconds = 0.0f;
+        if(ma_sound_get_cursor_in_seconds(&music_sound, &position_seconds) != MA_SUCCESS)
+        {
+            return 0;
+        }
+
+        return qMax<qint64>(0, static_cast<qint64>(position_seconds * 1000.0f + 0.5f));
+    }
+
     void CloseMusic()
     {
         StopRuntime();
@@ -2352,14 +2376,11 @@ private:
         }
         music_spectrum_preview.clear();
 
-        if(music_player != nullptr)
+        if(music_sound_ready)
         {
-            music_player->stop();
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-            music_player->setSource(QUrl());
-#else
-            music_player->setMedia(QMediaContent());
-#endif
+            ma_sound_stop(&music_sound);
+            ma_sound_uninit(&music_sound);
+            music_sound_ready = false;
         }
 
         music_loaded = false;
@@ -2378,6 +2399,10 @@ private:
         if(music_timer != nullptr)
         {
             music_timer->stop();
+        }
+        if(music_sound_ready)
+        {
+            ma_sound_stop(&music_sound);
         }
         music_playing = false;
         if(play_button != nullptr)
@@ -2405,6 +2430,11 @@ private:
         music_playing = false;
         music_duration_ms = 0;
         music_spectrum_preview.clear();
+        if(music_sound_ready)
+        {
+            ma_sound_uninit(&music_sound);
+            music_sound_ready = false;
+        }
         view->SetMusicSpectrum({}, 0);
 
         if(play_button != nullptr)
@@ -2434,13 +2464,13 @@ private:
     QPushButton* choose_music_button = nullptr;
     QPushButton* play_button = nullptr;
     QLabel* music_label = nullptr;
-    QMediaPlayer* music_player = nullptr;
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    QAudioOutput* music_audio_output = nullptr;
-#endif
     QTimer* music_timer = nullptr;
+    ma_engine music_engine;
+    ma_sound music_sound;
     QString music_path;
     qint64 music_duration_ms = 0;
+    bool music_engine_ready = false;
+    bool music_sound_ready = false;
     bool music_loaded = false;
     bool music_playing = false;
     QVector<qreal> music_spectrum_preview;
