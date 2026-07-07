@@ -10,9 +10,7 @@
 #include "EffectManager.h"
 #include "OpenRGBEffectSettings.h"
 
-#include <QAbstractItemModel>
 #include <QAbstractItemView>
-#include <QBrush>
 #include <QByteArray>
 #include <QColor>
 #include <QDrag>
@@ -26,6 +24,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
+#include <QDir>
 #include <QGraphicsItem>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsLineItem>
@@ -34,31 +33,37 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsView>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
-#include <QListWidget>
-#include <QListWidgetItem>
+#include <QMediaPlayer>
 #include <QMetaObject>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QPen>
+#include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
-#include <QStyle>
-#include <QStyledItemDelegate>
 #include <QStyleOptionGraphicsItem>
-#include <QStyleOptionViewItem>
 #include <QTimer>
 #include <QTransform>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QUrl>
 #include <QVector>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <QDir>
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QAudioOutput>
+#else
+#include <QMediaContent>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -70,11 +75,6 @@
 #include <vector>
 
 #include "miniaudio.h"
-
-#ifdef _WIN32
-#include <qt_windows.h>
-#include <mmsystem.h>
-#endif
 
 namespace
 {
@@ -117,21 +117,9 @@ struct LaneInfo
     int level = 0;
 };
 
-enum LaneListRole
-{
-    LaneLevelRole        = Qt::UserRole + 1,
-    LaneIsLastRole       = Qt::UserRole + 2,
-    LaneAncestorMaskRole = Qt::UserRole + 3,
-    LaneIsTreeRole       = Qt::UserRole + 4
-};
-
 enum EffectListRole
 {
-    EffectIdRole       = Qt::UserRole + 1,
-    EffectColorRole    = Qt::UserRole + 2,
-    EffectIsGroupRole  = Qt::UserRole + 3,
-    EffectGroupKeyRole = Qt::UserRole + 4,
-    EffectExpandedRole = Qt::UserRole + 5
+    EffectIdRole = Qt::UserRole + 1
 };
 
 class TimelineClipItem;
@@ -140,8 +128,6 @@ struct LaneEntry
 {
     QString name;
     int level = 0;
-    bool is_last = true;
-    int ancestor_mask = 0;
     RGBController* controller = nullptr;
     int zone_index = -1;
     int segment_index = -1;
@@ -259,7 +245,6 @@ QVector<qreal> BuildMusicSpectrumPreview(const QString& path)
         }
 
         qreal sum = 0.0;
-
         for(qint64 sample_idx = start; sample_idx < end; sample_idx++)
         {
             const qreal sample = samples[static_cast<int>(sample_idx)];
@@ -1442,283 +1427,122 @@ private:
     int horizontal_offset = 0;
 };
 
-class LaneTreeDelegate : public QStyledItemDelegate
-{
-public:
-    explicit LaneTreeDelegate(QObject* parent = nullptr) :
-        QStyledItemDelegate(parent)
-    {
-    }
-
-    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
-    {
-        QStyleOptionViewItem opt(option);
-        initStyleOption(&opt, index);
-
-        const QString text = opt.text;
-        const bool is_tree_item = index.data(LaneIsTreeRole).toBool();
-        const int level = is_tree_item ? qMax(0, index.data(LaneLevelRole).toInt()) : 0;
-        const bool is_last = index.data(LaneIsLastRole).toBool();
-        const int ancestor_mask = index.data(LaneAncestorMaskRole).toInt();
-        bool has_children = false;
-
-        if(is_tree_item && index.model() != nullptr && index.row() + 1 < index.model()->rowCount(index.parent()))
-        {
-            const QModelIndex next = index.model()->index(index.row() + 1, index.column(), index.parent());
-            has_children = next.data(LaneIsTreeRole).toBool() && next.data(LaneLevelRole).toInt() > level;
-        }
-
-        opt.text.clear();
-        if(opt.widget != nullptr)
-        {
-            opt.widget->style()->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
-        }
-
-        painter->save();
-        painter->setRenderHint(QPainter::Antialiasing, false);
-
-        const int left = opt.rect.left() + 13;
-        const int step = 18;
-        const int middle_y = opt.rect.center().y();
-        const QColor line_color = opt.palette.color(QPalette::Text);
-
-        if(is_tree_item)
-        {
-            painter->setPen(QPen(line_color, 1));
-
-            for(int depth = 0; depth < level; depth++)
-            {
-                if((ancestor_mask & (1 << depth)) == 0)
-                {
-                    continue;
-                }
-
-                const int x = left + depth * step;
-                painter->drawLine(QPoint(x, opt.rect.top()), QPoint(x, opt.rect.bottom()));
-            }
-
-            if(level > 0)
-            {
-                const int branch_x = left + (level - 1) * step;
-                const int text_x = left + level * step + 8;
-                painter->drawLine(QPoint(branch_x, opt.rect.top()), QPoint(branch_x, middle_y));
-
-                if(!is_last)
-                {
-                    painter->drawLine(QPoint(branch_x, middle_y), QPoint(branch_x, opt.rect.bottom()));
-                }
-
-                painter->drawLine(QPoint(branch_x, middle_y), QPoint(text_x - 5, middle_y));
-            }
-
-            if(has_children)
-            {
-                const int child_branch_x = left + level * step;
-                painter->drawLine(QPoint(child_branch_x, middle_y), QPoint(child_branch_x, opt.rect.bottom()));
-            }
-        }
-
-        QFont font = opt.font;
-        if(is_tree_item && level == 0)
-        {
-            font.setBold(true);
-        }
-        painter->setFont(font);
-        painter->setPen(opt.palette.color(QPalette::Text));
-
-        const int text_left = is_tree_item ? left + level * step + 8 : opt.rect.left() + 10;
-        const QRect text_rect = opt.rect.adjusted(text_left - opt.rect.left(), 0, -8, 0);
-        const QString elided = QFontMetrics(font).elidedText(text, Qt::ElideRight, text_rect.width());
-        painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, elided);
-        painter->restore();
-    }
-};
-
-class LaneListWidget : public QListWidget
+class LaneListWidget : public QTreeWidget
 {
 public:
     explicit LaneListWidget(QWidget* parent = nullptr) :
-        QListWidget(parent)
+        QTreeWidget(parent)
     {
         setAlternatingRowColors(true);
+        setColumnCount(1);
         setFrameShape(QFrame::NoFrame);
+        setHeaderHidden(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setIndentation(18);
+        setItemsExpandable(false);
+        setRootIsDecorated(true);
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setSelectionMode(QAbstractItemView::NoSelection);
-        setUniformItemSizes(true);
+        setUniformRowHeights(true);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-        setItemDelegate(new LaneTreeDelegate(this));
     }
 
     void SetLanes(const QVector<LaneEntry>& lanes)
     {
         clear();
 
-        QListWidgetItem* music_item = new QListWidgetItem("Music");
+        QTreeWidgetItem* music_item = new QTreeWidgetItem(this, QStringList("Music"));
         music_item->setFlags(Qt::ItemIsEnabled);
-        music_item->setData(LaneIsTreeRole, false);
-        music_item->setSizeHint(QSize(0, static_cast<int>(ROW_HEIGHT)));
-        music_item->setToolTip("Music");
-        addItem(music_item);
+        music_item->setSizeHint(0, QSize(0, static_cast<int>(ROW_HEIGHT)));
+        music_item->setToolTip(0, "Music");
+
+        QTreeWidgetItem* controller_item = nullptr;
+        QTreeWidgetItem* zone_item = nullptr;
 
         for(const LaneEntry& lane : lanes)
         {
-            QListWidgetItem* item = new QListWidgetItem(lane.name);
+            QTreeWidgetItem* parent_item = nullptr;
+            if(lane.level == 1)
+            {
+                parent_item = controller_item;
+            }
+            else if(lane.level >= 2)
+            {
+                parent_item = zone_item != nullptr ? zone_item : controller_item;
+            }
+
+            QTreeWidgetItem* item = parent_item != nullptr ?
+                new QTreeWidgetItem(parent_item, QStringList(lane.name)) :
+                new QTreeWidgetItem(this, QStringList(lane.name));
+
             item->setFlags(Qt::ItemIsEnabled);
-            item->setData(LaneLevelRole, lane.level);
-            item->setData(LaneIsLastRole, lane.is_last);
-            item->setData(LaneAncestorMaskRole, lane.ancestor_mask);
-            item->setData(LaneIsTreeRole, true);
-            item->setSizeHint(QSize(0, static_cast<int>(ROW_HEIGHT)));
-            item->setToolTip(lane.name);
-            addItem(item);
+            item->setSizeHint(0, QSize(0, static_cast<int>(ROW_HEIGHT)));
+            item->setToolTip(0, lane.name);
+
+            if(lane.level == 0)
+            {
+                controller_item = item;
+                zone_item = nullptr;
+            }
+            else if(lane.level == 1)
+            {
+                zone_item = item;
+            }
         }
+
+        expandAll();
     }
 };
 
-class EffectListDelegate : public QStyledItemDelegate
-{
-public:
-    explicit EffectListDelegate(QObject* parent = nullptr) :
-        QStyledItemDelegate(parent)
-    {
-    }
-
-    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
-    {
-        QStyleOptionViewItem opt(option);
-        initStyleOption(&opt, index);
-
-        const bool is_group = index.data(EffectIsGroupRole).toBool();
-        const QString text = opt.text;
-        opt.text.clear();
-
-        if(opt.widget != nullptr)
-        {
-            opt.widget->style()->drawControl(QStyle::CE_ItemViewItem, &opt, painter, opt.widget);
-        }
-
-        painter->save();
-        painter->setRenderHint(QPainter::Antialiasing, true);
-
-        if(is_group)
-        {
-            QFont font = opt.font;
-            font.setBold(true);
-            painter->setFont(font);
-            painter->setPen(opt.palette.color(QPalette::Text));
-
-            const bool expanded = index.data(EffectExpandedRole).toBool();
-            const QRect arrow_rect(opt.rect.left() + 8, opt.rect.top(), 14, opt.rect.height());
-            const QPoint center = arrow_rect.center();
-            QPolygon arrow;
-
-            if(expanded)
-            {
-                arrow << QPoint(center.x() - 4, center.y() - 2)
-                      << QPoint(center.x() + 4, center.y() - 2)
-                      << QPoint(center.x(), center.y() + 3);
-            }
-            else
-            {
-                arrow << QPoint(center.x() - 2, center.y() - 4)
-                      << QPoint(center.x() - 2, center.y() + 4)
-                      << QPoint(center.x() + 3, center.y());
-            }
-
-            painter->setBrush(opt.palette.color(QPalette::Text));
-            painter->setPen(Qt::NoPen);
-            painter->drawPolygon(arrow);
-
-            const QRect text_rect = opt.rect.adjusted(26, 0, -8, 0);
-            painter->setPen(opt.palette.color(QPalette::Text));
-            painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft,
-                QFontMetrics(font).elidedText(text, Qt::ElideRight, text_rect.width()));
-        }
-        else
-        {
-            const QColor dot_color = index.data(EffectColorRole).value<QColor>();
-            const int dot_size = 9;
-            const QRect dot_rect(opt.rect.left() + 13, opt.rect.center().y() - dot_size / 2, dot_size, dot_size);
-            painter->setPen(Qt::NoPen);
-            painter->setBrush(dot_color.isValid() ? dot_color : opt.palette.color(QPalette::Highlight));
-            painter->drawEllipse(dot_rect);
-
-            painter->setFont(opt.font);
-            painter->setPen(opt.palette.color(QPalette::Text));
-            const QRect text_rect = opt.rect.adjusted(30, 0, -8, 0);
-            painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft,
-                QFontMetrics(opt.font).elidedText(text, Qt::ElideRight, text_rect.width()));
-        }
-
-        painter->restore();
-    }
-};
-
-class EffectsListWidget : public QListWidget
+class EffectsListWidget : public QTreeWidget
 {
 public:
     explicit EffectsListWidget(QWidget* parent = nullptr) :
-        QListWidget(parent)
+        QTreeWidget(parent)
     {
+        setColumnCount(1);
         setDragEnabled(true);
         setFrameShape(QFrame::NoFrame);
+        setHeaderHidden(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setIndentation(16);
+        setRootIsDecorated(true);
         setSelectionMode(QAbstractItemView::SingleSelection);
-        setSpacing(0);
-        setUniformItemSizes(true);
+        setUniformRowHeights(true);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-        setItemDelegate(new EffectListDelegate(this));
 
         for(const LightTrackEffectGroup& group : EffectGroups())
         {
-            QListWidgetItem* group_item = new QListWidgetItem(group.name);
+            QTreeWidgetItem* group_item = new QTreeWidgetItem(this, QStringList(group.name));
             group_item->setFlags(Qt::ItemIsEnabled);
-            group_item->setData(EffectIsGroupRole, true);
-            group_item->setData(EffectGroupKeyRole, group.name);
-            group_item->setData(EffectExpandedRole, true);
-            group_item->setSizeHint(QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
-            group_item->setToolTip(group.name);
-            addItem(group_item);
+            group_item->setSizeHint(0, QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
+            group_item->setToolTip(0, group.name);
 
             for(const LightTrackEffectInfo& effect : group.effects)
             {
-                QListWidgetItem* item = new QListWidgetItem(effect.name);
-                item->setData(EffectIdRole, effect.id.toUtf8());
-                item->setData(EffectColorRole, effect.color);
-                item->setData(EffectGroupKeyRole, group.name);
-                item->setToolTip(group.name + QStringLiteral(" / ") + effect.name);
+                QTreeWidgetItem* item = new QTreeWidgetItem(group_item, QStringList(effect.name));
+                item->setData(0, EffectIdRole, effect.id.toUtf8());
+                item->setIcon(0, ColorIcon(effect.color));
+                item->setToolTip(0, group.name + QStringLiteral(" / ") + effect.name);
                 item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
-                item->setSizeHint(QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
-                addItem(item);
+                item->setSizeHint(0, QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
             }
         }
+
+        expandAll();
     }
 
 protected:
-    void mousePressEvent(QMouseEvent* event) override
-    {
-        QListWidgetItem* item = itemAt(event->pos());
-        if(event->button() == Qt::LeftButton && item != nullptr && item->data(EffectIsGroupRole).toBool())
-        {
-            ToggleGroup(item);
-            event->accept();
-            return;
-        }
-
-        QListWidget::mousePressEvent(event);
-    }
-
     void startDrag(Qt::DropActions) override
     {
-        QListWidgetItem* item = currentItem();
-        if(item == nullptr || item->data(EffectIsGroupRole).toBool())
+        QTreeWidgetItem* item = currentItem();
+        if(item == nullptr || item->childCount() > 0)
         {
             return;
         }
 
         QMimeData* mime_data = new QMimeData();
-        mime_data->setData(EFFECT_MIME, item->data(EffectIdRole).toByteArray());
+        mime_data->setData(EFFECT_MIME, item->data(0, EffectIdRole).toByteArray());
 
         QDrag* drag = new QDrag(this);
         drag->setMimeData(mime_data);
@@ -1726,28 +1550,17 @@ protected:
     }
 
 private:
-    void ToggleGroup(QListWidgetItem* group_item)
+    QIcon ColorIcon(const QColor& color) const
     {
-        const QString group_key = group_item->data(EffectGroupKeyRole).toString();
-        const bool expanded = !group_item->data(EffectExpandedRole).toBool();
-        group_item->setData(EffectExpandedRole, expanded);
+        QPixmap pixmap(10, 10);
+        pixmap.fill(Qt::transparent);
 
-        const int group_row = this->row(group_item);
-        for(int item_row = group_row + 1; item_row < count(); item_row++)
-        {
-            QListWidgetItem* item = this->item(item_row);
-            if(item == nullptr || item->data(EffectIsGroupRole).toBool())
-            {
-                break;
-            }
-
-            if(item->data(EffectGroupKeyRole).toString() == group_key)
-            {
-                item->setHidden(!expanded);
-            }
-        }
-
-        viewport()->update();
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color.isValid() ? color : palette().color(QPalette::Highlight));
+        painter.drawEllipse(QRectF(1.0, 1.0, 8.0, 8.0));
+        return QIcon(pixmap);
     }
 };
 
@@ -1925,6 +1738,11 @@ public:
         ruler = new TimelineRulerWidget(this);
         view = new LightTrackView(this);
         effects_list = new EffectsListWidget(this);
+        music_player = new QMediaPlayer(this);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        music_audio_output = new QAudioOutput(this);
+        music_player->setAudioOutput(music_audio_output);
+#endif
         music_timer = new QTimer(this);
         music_timer->setInterval(33);
         view->SetRuler(ruler);
@@ -2005,7 +1823,35 @@ public:
         {
             UpdateMusicPosition();
         });
-
+        connect(music_player, &QMediaPlayer::durationChanged, this, [this](qint64 duration)
+        {
+            music_duration_ms = qMax<qint64>(0, duration);
+            view->SetMusicSpectrum(music_spectrum_preview, music_duration_ms);
+        });
+        connect(music_player, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus status)
+        {
+            if(status == QMediaPlayer::EndOfMedia)
+            {
+                FinishMusicPlayback();
+            }
+        });
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        connect(music_player, &QMediaPlayer::errorOccurred, this, [this](QMediaPlayer::Error error, const QString&)
+        {
+            if(error != QMediaPlayer::NoError)
+            {
+                MarkMusicError();
+            }
+        });
+#else
+        connect(music_player, QOverload<QMediaPlayer::Error>::of(&QMediaPlayer::error), this, [this](QMediaPlayer::Error error)
+        {
+            if(error != QMediaPlayer::NoError)
+            {
+                MarkMusicError();
+            }
+        });
+#endif
         ReloadDevices();
     }
 
@@ -2042,14 +1888,13 @@ public:
         for(int controller_idx = 0; controller_idx < static_cast<int>(controllers.size()); controller_idx++)
         {
             RGBController* controller = controllers[controller_idx];
-            lanes.push_back({QString::fromStdString(controller->GetName()), 0, true, 0, controller, -1, -1});
+            lanes.push_back({QString::fromStdString(controller->GetName()), 0, controller, -1, -1});
 
             for(int zone_idx = 0; zone_idx < static_cast<int>(controller->zones.size()); zone_idx++)
             {
                 const zone& zone_ref = controller->zones[zone_idx];
-                const bool is_last_zone = zone_idx == static_cast<int>(controller->zones.size()) - 1;
                 const int zone_lane = lanes.size();
-                lanes.push_back({QString::fromStdString(zone_ref.name), 1, is_last_zone, 0, controller, zone_idx, -1});
+                lanes.push_back({QString::fromStdString(zone_ref.name), 1, controller, zone_idx, -1});
 
                 if(zone_ref.segments.empty())
                 {
@@ -2060,10 +1905,8 @@ public:
                 for(int segment_idx = 0; segment_idx < static_cast<int>(zone_ref.segments.size()); segment_idx++)
                 {
                     const segment& segment_ref = zone_ref.segments[segment_idx];
-                    const bool is_last_segment = segment_idx == static_cast<int>(zone_ref.segments.size()) - 1;
-                    const int ancestor_mask = is_last_zone ? 0 : 1;
                     const int segment_lane = lanes.size();
-                    lanes.push_back({QString::fromStdString(segment_ref.name), 2, is_last_segment, ancestor_mask, controller, zone_idx, segment_idx});
+                    lanes.push_back({QString::fromStdString(segment_ref.name), 2, controller, zone_idx, segment_idx});
                     AddRuntimeTarget(segment_lane, controller, zone_idx, segment_idx);
                 }
             }
@@ -2384,56 +2227,43 @@ private:
 
         CloseMusic();
         music_path = path;
+        music_spectrum_preview.clear();
         play_button->setText("Play");
         play_button->setEnabled(false);
         view->SetMusicPosition(0);
 
         const QFileInfo file_info(path);
-        const QVector<qreal> spectrum = BuildMusicSpectrumPreview(path);
         music_label->setText(file_info.fileName());
         music_label->setToolTip(path);
 
         if(!OpenMusic(path))
         {
             music_label->setText(file_info.fileName() + " (cannot play)");
-            view->SetMusicSpectrum(spectrum, 0);
+            view->SetMusicSpectrum({}, 0);
             return;
         }
 
-        view->SetMusicSpectrum(spectrum, music_duration_ms);
+        music_spectrum_preview = BuildMusicSpectrumPreview(path);
+        view->SetMusicSpectrum(music_spectrum_preview, music_duration_ms);
         play_button->setEnabled(true);
     }
 
     bool OpenMusic(const QString& path)
     {
-#ifdef _WIN32
-        music_alias = QString("lighttrack_music_%1").arg(reinterpret_cast<quintptr>(this), 0, 16);
-        QString native_path = QDir::toNativeSeparators(path);
-        native_path.remove('"');
-
-        if(!Mci(QString("open \"%1\" alias %2").arg(native_path, music_alias)))
+        if(path.isEmpty())
         {
-            music_alias.clear();
             return false;
         }
 
-        Mci(QString("set %1 time format milliseconds").arg(music_alias));
-        music_duration_ms = MciNumber(QString("status %1 length").arg(music_alias));
-
-        if(music_duration_ms <= 0)
-        {
-            CloseMusic();
-            return false;
-        }
-
-        music_loaded = true;
-        return true;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        music_player->setSource(QUrl::fromLocalFile(path));
 #else
-        Q_UNUSED(path);
-        music_duration_ms = 0;
-        music_loaded = false;
-        return false;
+        music_player->setMedia(QMediaContent(QUrl::fromLocalFile(path)));
 #endif
+
+        music_duration_ms = qMax<qint64>(0, music_player->duration());
+        music_loaded = true;
+        return music_player->error() == QMediaPlayer::NoError;
     }
 
     void ToggleMusicPlayback()
@@ -2443,10 +2273,9 @@ private:
             return;
         }
 
-#ifdef _WIN32
         if(music_playing)
         {
-            Mci(QString("pause %1").arg(music_alias));
+            music_player->pause();
             music_timer->stop();
             music_playing = false;
             play_button->setText("Play");
@@ -2454,20 +2283,17 @@ private:
             return;
         }
 
-        if(music_duration_ms > 0 && MusicPosition() >= music_duration_ms - 20)
+        if(music_duration_ms > 0 && music_player->position() >= music_duration_ms - 20)
         {
-            Mci(QString("seek %1 to start").arg(music_alias));
+            music_player->setPosition(0);
             view->SetMusicPosition(0);
         }
 
-        if(Mci(QString("play %1").arg(music_alias)))
-        {
-            music_timer->start();
-            music_playing = true;
-            play_button->setText("Pause");
-            StartRuntime(MusicPosition());
-        }
-#endif
+        music_player->play();
+        music_timer->start();
+        music_playing = true;
+        play_button->setText("Pause");
+        StartRuntime(music_player->position());
     }
 
     void SeekMusic(qint64 position_ms)
@@ -2477,24 +2303,17 @@ private:
             return;
         }
 
-#ifdef _WIN32
-        const qint64 clamped_position = qBound<qint64>(0, position_ms, music_duration_ms);
-        Mci(QString("seek %1 to %2").arg(music_alias).arg(clamped_position));
+        const qint64 clamped_position = music_duration_ms > 0 ?
+            qBound<qint64>(0, position_ms, music_duration_ms) :
+            qMax<qint64>(0, position_ms);
 
-        if(music_playing)
-        {
-            Mci(QString("play %1").arg(music_alias));
-        }
-
+        music_player->setPosition(clamped_position);
         view->SetMusicPosition(clamped_position);
 
         if(music_playing)
         {
             StartRuntime(clamped_position);
         }
-#else
-        Q_UNUSED(position_ms);
-#endif
     }
 
     void UpdateMusicPosition()
@@ -2504,16 +2323,12 @@ private:
             return;
         }
 
-#ifdef _WIN32
-        qint64 position = MusicPosition();
-        const bool finished = music_playing && MciText(QString("status %1 mode").arg(music_alias)) == "stopped";
+        qint64 position = music_player->position();
 
-        if(finished || (music_duration_ms > 0 && position >= music_duration_ms))
+        if(music_duration_ms > 0 && position >= music_duration_ms)
         {
-            position = music_duration_ms;
-            music_timer->stop();
-            music_playing = false;
-            play_button->setText("Play");
+            FinishMusicPlayback();
+            return;
         }
 
         view->SetMusicPosition(position);
@@ -2526,7 +2341,6 @@ private:
         {
             StopRuntime();
         }
-#endif
     }
 
     void CloseMusic()
@@ -2536,16 +2350,18 @@ private:
         {
             music_timer->stop();
         }
+        music_spectrum_preview.clear();
 
-#ifdef _WIN32
-        if(!music_alias.isEmpty())
+        if(music_player != nullptr)
         {
-            Mci(QString("stop %1").arg(music_alias));
-            Mci(QString("close %1").arg(music_alias));
-        }
+            music_player->stop();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+            music_player->setSource(QUrl());
+#else
+            music_player->setMedia(QMediaContent());
 #endif
+        }
 
-        music_alias.clear();
         music_loaded = false;
         music_playing = false;
         music_duration_ms = 0;
@@ -2557,45 +2373,51 @@ private:
         }
     }
 
-#ifdef _WIN32
-    bool Mci(const QString& command, QString* result = nullptr) const
+    void FinishMusicPlayback()
     {
-        wchar_t buffer[256] = {};
-        const MCIERROR error = mciSendStringW(reinterpret_cast<LPCWSTR>(command.utf16()),
-            result == nullptr ? nullptr : buffer, result == nullptr ? 0 : 256, nullptr);
-
-        if(error != 0)
+        if(music_timer != nullptr)
         {
-            return false;
+            music_timer->stop();
+        }
+        music_playing = false;
+        if(play_button != nullptr)
+        {
+            play_button->setText("Play");
+        }
+        view->SetMusicPosition(music_duration_ms);
+        StopRuntime();
+    }
+
+    void MarkMusicError()
+    {
+        if(!music_loaded)
+        {
+            return;
         }
 
-        if(result != nullptr)
+        StopRuntime();
+        if(music_timer != nullptr)
         {
-            *result = QString::fromWCharArray(buffer).trimmed();
+            music_timer->stop();
         }
 
-        return true;
-    }
+        music_loaded = false;
+        music_playing = false;
+        music_duration_ms = 0;
+        music_spectrum_preview.clear();
+        view->SetMusicSpectrum({}, 0);
 
-    QString MciText(const QString& command) const
-    {
-        QString result;
-        Mci(command, &result);
-        return result;
-    }
+        if(play_button != nullptr)
+        {
+            play_button->setText("Play");
+            play_button->setEnabled(false);
+        }
 
-    qint64 MciNumber(const QString& command) const
-    {
-        bool ok = false;
-        const qint64 value = MciText(command).toLongLong(&ok);
-        return ok ? value : 0;
+        if(music_label != nullptr)
+        {
+            music_label->setText(QFileInfo(music_path).fileName() + " (cannot play)");
+        }
     }
-
-    qint64 MusicPosition() const
-    {
-        return MciNumber(QString("status %1 position").arg(music_alias));
-    }
-#endif
 
     void SetLanes(const QVector<LaneEntry>& lanes, const QString& empty_message)
     {
@@ -2612,12 +2434,16 @@ private:
     QPushButton* choose_music_button = nullptr;
     QPushButton* play_button = nullptr;
     QLabel* music_label = nullptr;
+    QMediaPlayer* music_player = nullptr;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QAudioOutput* music_audio_output = nullptr;
+#endif
     QTimer* music_timer = nullptr;
     QString music_path;
-    QString music_alias;
     qint64 music_duration_ms = 0;
     bool music_loaded = false;
     bool music_playing = false;
+    QVector<qreal> music_spectrum_preview;
     QVector<LaneEntry> current_lanes;
     std::vector<std::unique_ptr<ControllerZone>> runtime_zones;
     QVector<RuntimeTarget> runtime_targets;

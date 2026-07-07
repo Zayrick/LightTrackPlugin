@@ -8,8 +8,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets OpenGL)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets OpenGL)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets OpenGL Multimedia)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets OpenGL Multimedia)
 if(QT_VERSION_MAJOR EQUAL 6)
   find_package(Qt6 REQUIRED COMPONENTS Core5Compat OpenGLWidgets)
 endif()
@@ -131,7 +131,7 @@ target_include_directories(LightTrackPlugin PRIVATE
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/include
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/include/internal
 )
-target_link_libraries(LightTrackPlugin PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGL)
+target_link_libraries(LightTrackPlugin PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGL Qt${QT_VERSION_MAJOR}::Multimedia)
 if(QT_VERSION_MAJOR EQUAL 6)
   target_link_libraries(LightTrackPlugin PRIVATE Qt6::Core5Compat Qt6::OpenGLWidgets)
 endif()
