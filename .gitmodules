@@ -1,9 +1,9 @@
-[submodule "OpenRGB"]
-	path = OpenRGB
+[submodule "deps/OpenRGB"]
+	path = deps/OpenRGB
 	url = https://gitlab.com/CalcProgrammer1/OpenRGB.git
-[submodule "third_party/miniaudio"]
-	path = third_party/miniaudio
+[submodule "deps/miniaudio"]
+	path = deps/miniaudio
 	url = https://github.com/mackron/miniaudio.git
-[submodule "OpenRGBEffectsPlugin"]
-	path = OpenRGBEffectsPlugin
+[submodule "deps/OpenRGBEffectsPlugin"]
+	path = deps/OpenRGBEffectsPlugin
 	url = https://gitlab.com/OpenRGBDevelopers/OpenRGBEffectsPlugin.git

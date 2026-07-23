@@ -14,7 +14,9 @@ if(QT_VERSION_MAJOR EQUAL 6)
   find_package(Qt6 REQUIRED COMPONENTS Core5Compat OpenGLWidgets)
 endif()
 
-set(OPENRGB_EFFECTS_PLUGIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGBEffectsPlugin)
+set(OPENRGB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/OpenRGB)
+set(OPENRGB_EFFECTS_PLUGIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/OpenRGBEffectsPlugin)
+set(MINIAUDIO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/miniaudio)
 file(GLOB_RECURSE OPENRGB_EFFECT_SOURCES CONFIGURE_DEPENDS
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/*.cpp
 )
@@ -65,14 +67,14 @@ add_library(LightTrackPlugin SHARED
   LightTrackPlugin_global.h
   LightTrackPlugin.cpp
   LightTrackPlugin.h
-  third_party/miniaudio/miniaudio.c
+  ${MINIAUDIO_DIR}/miniaudio.c
   LightTrackEffectCatalog.h
   LightTrackEffectCatalog.cpp
   LightTrackOpenRGBEffectsBridge.h
   LightTrackOpenRGBEffectsBridge.cpp
-  OpenRGB/RGBController/RGBController.cpp
-  OpenRGB/qt/hsv.cpp
-  OpenRGB/qt/QTooltipedSlider.cpp
+  ${OPENRGB_DIR}/RGBController/RGBController.cpp
+  ${OPENRGB_DIR}/qt/hsv.cpp
+  ${OPENRGB_DIR}/qt/QTooltipedSlider.cpp
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectListManager.cpp
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectList.cpp
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectManager.cpp
@@ -111,14 +113,14 @@ target_compile_definitions(LightTrackPlugin PRIVATE MA_NO_ENCODING)
 target_compile_definitions(LightTrackPlugin PRIVATE SHADERS_README="https://gitlab.com/OpenRGBDevelopers/OpenRGBEffectsPlugin/-/blob/master/Effects/Shaders/README.md")
 set_target_properties(LightTrackPlugin PROPERTIES AUTOUIC_SEARCH_PATHS "${OPENRGB_EFFECT_UI_DIRS}")
 target_include_directories(LightTrackPlugin PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB
-  ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB/RGBController
-  ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB/dependencies/json
-  ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB/i2c_smbus
-  ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB/net_port
-  ${CMAKE_CURRENT_SOURCE_DIR}/OpenRGB/qt
+  ${OPENRGB_DIR}
+  ${OPENRGB_DIR}/RGBController
+  ${OPENRGB_DIR}/dependencies/json
+  ${OPENRGB_DIR}/i2c_smbus
+  ${OPENRGB_DIR}/net_port
+  ${OPENRGB_DIR}/qt
   ${CMAKE_CURRENT_BINARY_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniaudio
+  ${MINIAUDIO_DIR}
   ${OPENRGB_EFFECTS_PLUGIN_DIR}
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/Audio
   ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects
