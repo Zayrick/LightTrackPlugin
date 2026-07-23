@@ -11,8 +11,11 @@
 #include "OpenRGBEffectSettings.h"
 
 #include <QAbstractItemView>
+#include <QAbstractScrollArea>
+#include <QApplication>
 #include <QByteArray>
 #include <QColor>
+#include <QCursor>
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -312,6 +315,438 @@ QLabel* HeaderLabel(const QString& text, QWidget* parent)
 
     return label;
 }
+
+class OverlayScrollBar : public QWidget
+{
+public:
+    explicit OverlayScrollBar(QAbstractScrollArea* scroll_area, Qt::Orientation orientation) :
+        // Keep the overlay outside the viewport so scrollContentsBy() cannot move it with the content.
+        QWidget(scroll_area),
+        scroll_area(scroll_area),
+        scroll_bar(orientation == Qt::Horizontal ? scroll_area->horizontalScrollBar() : scroll_area->verticalScrollBar()),
+        orientation(orientation)
+    {
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAttribute(Qt::WA_StyledBackground, false);
+        setAutoFillBackground(false);
+        setFocusPolicy(Qt::NoFocus);
+        setMouseTracking(true);
+        hide();
+
+        QWidget* scroll_viewport = scroll_area->viewport();
+        scroll_viewport->setMouseTracking(true);
+        scroll_viewport->installEventFilter(this);
+
+        if(orientation == Qt::Horizontal)
+        {
+            scroll_area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        }
+        else
+        {
+            scroll_area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        }
+
+        fade_timer.setInterval(16);
+        connect(&fade_timer, &QTimer::timeout, this, [this]()
+        {
+            const qreal step = target_opacity > opacity ? 0.18 : -0.12;
+            opacity = qBound<qreal>(0.0, opacity + step, 1.0);
+
+            if((step > 0.0 && opacity >= target_opacity) || (step < 0.0 && opacity <= target_opacity))
+            {
+                opacity = target_opacity;
+                fade_timer.stop();
+            }
+
+            update();
+
+            if(opacity <= 0.0 && target_opacity <= 0.0)
+            {
+                hide();
+            }
+        });
+
+        hide_timer.setSingleShot(true);
+        hide_timer.setInterval(HIDE_DELAY_MS);
+        connect(&hide_timer, &QTimer::timeout, this, [this]()
+        {
+            if(!pointer_near && !dragging)
+            {
+                FadeTo(0.0);
+            }
+        });
+
+        connect(scroll_bar, &QScrollBar::rangeChanged, this, [this](int, int)
+        {
+            if(!IsScrollable())
+            {
+                pointer_near = false;
+                hide_timer.stop();
+                opacity = 0.0;
+                target_opacity = 0.0;
+                fade_timer.stop();
+                hide();
+            }
+
+            update();
+        });
+        connect(scroll_bar, &QScrollBar::valueChanged, this, [this](int)
+        {
+            update();
+            RevealTemporarily();
+        });
+
+        UpdateGeometry();
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if(watched == scroll_area->viewport())
+        {
+            switch(event->type())
+            {
+                case QEvent::Resize:
+                case QEvent::Move:
+                case QEvent::Show:
+                    UpdateGeometry();
+                    break;
+
+                case QEvent::MouseMove:
+                {
+                    const QMouseEvent* mouse_event = static_cast<QMouseEvent*>(event);
+                    UpdatePointerProximity(mouse_event->pos());
+                    break;
+                }
+
+                case QEvent::Enter:
+                case QEvent::Leave:
+                    UpdatePointerProximityFromCursor();
+                    break;
+
+                case QEvent::Wheel:
+                    RevealTemporarily();
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        return QWidget::eventFilter(watched, event);
+    }
+
+    bool event(QEvent* event) override
+    {
+        if(event->type() == QEvent::Enter || event->type() == QEvent::Leave)
+        {
+            UpdatePointerProximityFromCursor();
+        }
+
+        return QWidget::event(event);
+    }
+
+    void paintEvent(QPaintEvent*) override
+    {
+        if(!IsScrollable() || opacity <= 0.0)
+        {
+            return;
+        }
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+
+        QColor thumb_color = palette().color(QPalette::Text);
+        thumb_color.setAlpha(qRound(153 * opacity));
+        painter.setBrush(thumb_color);
+
+        const QRectF thumb = ThumbRect();
+        painter.drawRoundedRect(thumb, THUMB_WIDTH / 2.0, THUMB_WIDTH / 2.0);
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if(event->button() != Qt::LeftButton || !IsScrollable())
+        {
+            QWidget::mousePressEvent(event);
+            return;
+        }
+
+        const qreal pointer_position = AxisPosition(event->pos());
+        const QRectF thumb = ThumbRect();
+        const qreal thumb_start = orientation == Qt::Horizontal ? thumb.left() : thumb.top();
+        const qreal thumb_length = orientation == Qt::Horizontal ? thumb.width() : thumb.height();
+
+        dragging = true;
+        hide_timer.stop();
+        Reveal();
+
+        if(thumb.contains(event->pos()))
+        {
+            drag_offset = pointer_position - thumb_start;
+        }
+        else
+        {
+            drag_offset = thumb_length / 2.0;
+            SetValueFromThumbPosition(pointer_position - drag_offset);
+        }
+
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if(dragging)
+        {
+            SetValueFromThumbPosition(AxisPosition(event->pos()) - drag_offset);
+            event->accept();
+            return;
+        }
+
+        UpdatePointerProximityFromCursor();
+        QWidget::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if(event->button() == Qt::LeftButton && dragging)
+        {
+            dragging = false;
+            UpdatePointerProximityFromCursor();
+
+            if(!pointer_near)
+            {
+                hide_timer.start();
+            }
+
+            event->accept();
+            return;
+        }
+
+        QWidget::mouseReleaseEvent(event);
+    }
+
+    void wheelEvent(QWheelEvent* event) override
+    {
+        RevealTemporarily();
+
+        const QPoint pixel_delta = event->pixelDelta();
+        const QPoint angle_delta = event->angleDelta();
+        int delta = orientation == Qt::Horizontal ? pixel_delta.x() : pixel_delta.y();
+
+        if(delta == 0)
+        {
+            delta = orientation == Qt::Horizontal ? pixel_delta.y() : pixel_delta.x();
+        }
+
+        if(delta != 0)
+        {
+            wheel_remainder += delta;
+        }
+        else
+        {
+            delta = orientation == Qt::Horizontal ? angle_delta.x() : angle_delta.y();
+            if(delta == 0)
+            {
+                delta = orientation == Qt::Horizontal ? angle_delta.y() : angle_delta.x();
+            }
+
+            const int scroll_lines = qMax(1, QApplication::wheelScrollLines());
+            const int single_step = qMax(1, scroll_bar->singleStep());
+            wheel_remainder += static_cast<qreal>(delta) * scroll_lines * single_step / 120.0;
+        }
+
+        const int whole_delta = static_cast<int>(wheel_remainder);
+        if(whole_delta != 0)
+        {
+            scroll_bar->setValue(scroll_bar->value() - whole_delta);
+            wheel_remainder -= whole_delta;
+        }
+
+        event->accept();
+    }
+
+private:
+    static const int HIT_WIDTH = 14;
+    static const int THUMB_WIDTH = 5;
+    static const int EDGE_MARGIN = 3;
+    static const int TRACK_PADDING = 2;
+    static const int MIN_THUMB_LENGTH = 28;
+    static const int REVEAL_DISTANCE = 26;
+    static const int HIDE_DELAY_MS = 650;
+
+    bool IsScrollable() const
+    {
+        return scroll_bar->maximum() > scroll_bar->minimum();
+    }
+
+    qreal AxisPosition(const QPoint& point) const
+    {
+        return orientation == Qt::Horizontal ? point.x() : point.y();
+    }
+
+    qreal TrackLength() const
+    {
+        return qMax<qreal>(0.0, (orientation == Qt::Horizontal ? width() : height()) - 2.0 * TRACK_PADDING);
+    }
+
+    qreal ThumbLength() const
+    {
+        const qreal track_length = TrackLength();
+        const qreal range = scroll_bar->maximum() - scroll_bar->minimum();
+        const qreal page_step = qMax(1, scroll_bar->pageStep());
+        const qreal content_length = range + page_step;
+
+        if(track_length <= 0.0 || content_length <= 0.0)
+        {
+            return 0.0;
+        }
+
+        return qMin(track_length, qMax<qreal>(MIN_THUMB_LENGTH, track_length * page_step / content_length));
+    }
+
+    QRectF ThumbRect() const
+    {
+        const qreal track_length = TrackLength();
+        const qreal thumb_length = ThumbLength();
+        const qreal movable_length = qMax<qreal>(0.0, track_length - thumb_length);
+        const qreal range = scroll_bar->maximum() - scroll_bar->minimum();
+        const qreal ratio = range > 0.0 ? (scroll_bar->value() - scroll_bar->minimum()) / range : 0.0;
+        const qreal thumb_position = TRACK_PADDING + movable_length * ratio;
+
+        if(orientation == Qt::Horizontal)
+        {
+            return QRectF(thumb_position, (height() - THUMB_WIDTH) / 2.0, thumb_length, THUMB_WIDTH);
+        }
+
+        return QRectF((width() - THUMB_WIDTH) / 2.0, thumb_position, THUMB_WIDTH, thumb_length);
+    }
+
+    void SetValueFromThumbPosition(qreal position)
+    {
+        const qreal movable_length = qMax<qreal>(0.0, TrackLength() - ThumbLength());
+        if(movable_length <= 0.0)
+        {
+            return;
+        }
+
+        const qreal clamped_position = qBound<qreal>(0.0, position - TRACK_PADDING, movable_length);
+        const qreal ratio = clamped_position / movable_length;
+        const int range = scroll_bar->maximum() - scroll_bar->minimum();
+        scroll_bar->setValue(scroll_bar->minimum() + qRound(range * ratio));
+    }
+
+    void UpdateGeometry()
+    {
+        const QRect viewport_geometry = scroll_area->viewport()->geometry();
+
+        if(orientation == Qt::Horizontal)
+        {
+            const int length = qMax(0, viewport_geometry.width() - 2 * EDGE_MARGIN);
+            setGeometry(viewport_geometry.left() + EDGE_MARGIN,
+                viewport_geometry.bottom() - HIT_WIDTH + 1, length, HIT_WIDTH);
+        }
+        else
+        {
+            const int length = qMax(0, viewport_geometry.height() - 2 * EDGE_MARGIN);
+            setGeometry(viewport_geometry.right() - HIT_WIDTH + 1,
+                viewport_geometry.top() + EDGE_MARGIN, HIT_WIDTH, length);
+        }
+
+        raise();
+        update();
+    }
+
+    void UpdatePointerProximity(const QPoint& viewport_position)
+    {
+        const QRect viewport_rect = scroll_area->viewport()->rect();
+        const bool inside = viewport_rect.contains(viewport_position);
+        const bool near_edge = orientation == Qt::Horizontal ?
+            viewport_position.y() >= viewport_rect.bottom() - REVEAL_DISTANCE :
+            viewport_position.x() >= viewport_rect.right() - REVEAL_DISTANCE;
+        const bool is_near = IsScrollable() && inside && near_edge;
+
+        if(pointer_near == is_near)
+        {
+            return;
+        }
+
+        pointer_near = is_near;
+        if(pointer_near)
+        {
+            hide_timer.stop();
+            Reveal();
+        }
+        else if(!dragging)
+        {
+            hide_timer.start();
+        }
+    }
+
+    void UpdatePointerProximityFromCursor()
+    {
+        QWidget* scroll_viewport = scroll_area->viewport();
+        UpdatePointerProximity(scroll_viewport->mapFromGlobal(QCursor::pos()));
+    }
+
+    void Reveal()
+    {
+        if(!IsScrollable())
+        {
+            return;
+        }
+
+        show();
+        raise();
+        FadeTo(1.0);
+    }
+
+    void RevealTemporarily()
+    {
+        if(!IsScrollable())
+        {
+            return;
+        }
+
+        Reveal();
+        if(!pointer_near && !dragging)
+        {
+            hide_timer.start();
+        }
+    }
+
+    void FadeTo(qreal target)
+    {
+        target_opacity = target;
+        if(qFuzzyCompare(opacity, target_opacity))
+        {
+            if(target_opacity <= 0.0)
+            {
+                hide();
+            }
+            return;
+        }
+
+        if(!fade_timer.isActive())
+        {
+            fade_timer.start();
+        }
+    }
+
+    QAbstractScrollArea* scroll_area;
+    QScrollBar* scroll_bar;
+    Qt::Orientation orientation;
+    QTimer fade_timer;
+    QTimer hide_timer;
+    qreal opacity = 0.0;
+    qreal target_opacity = 0.0;
+    qreal drag_offset = 0.0;
+    qreal wheel_remainder = 0.0;
+    bool pointer_near = false;
+    bool dragging = false;
+};
 
 QString LucideFontFamily()
 {
@@ -1529,7 +1964,10 @@ public:
         setRootIsDecorated(true);
         setSelectionMode(QAbstractItemView::SingleSelection);
         setUniformRowHeights(true);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+
+        new OverlayScrollBar(this, Qt::Vertical);
 
         for(const LightTrackEffectGroup& group : EffectGroups())
         {
@@ -1599,9 +2037,14 @@ public:
         setRenderHints(QPainter::TextAntialiasing);
         setCacheMode(QGraphicsView::CacheBackground);
         setViewportUpdateMode(QGraphicsView::BoundingRectViewportUpdate);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
         light_scene->SetPalette(palette());
         light_scene->SetViewportSize(viewport()->size());
+
+        new OverlayScrollBar(this, Qt::Horizontal);
+        new OverlayScrollBar(this, Qt::Vertical);
 
         connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, [this](int value)
         {
