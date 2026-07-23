@@ -802,12 +802,7 @@ protected:
 
         for(int i = first_lane; i <= last_lane; i++)
         {
-            QColor row_color = (i % 2 == 0) ? palette.color(QPalette::Base) : palette.color(QPalette::AlternateBase);
-
-            if(!row_color.isValid() || row_color == palette.color(QPalette::Base))
-            {
-                row_color = (i % 2 == 0) ? palette.color(QPalette::Base) : palette.color(QPalette::Window);
-            }
+            const QColor row_color = palette.color(QPalette::Base);
 
             PaintRow(painter, QRectF(0.0, ROW_HEIGHT + i * ROW_HEIGHT, sceneRect().width(), ROW_HEIGHT),
                 row_color, TextLineColor(palette, 38, 72), TextLineColor(palette, 20, 38), rect);
@@ -1458,7 +1453,7 @@ public:
     explicit LaneListWidget(QWidget* parent = nullptr) :
         QTreeWidget(parent)
     {
-        setAlternatingRowColors(true);
+        setAlternatingRowColors(false);
         setColumnCount(1);
         setFrameShape(QFrame::NoFrame);
         setHeaderHidden(true);
@@ -1823,7 +1818,7 @@ public:
         QWidget* content = new QWidget(this);
         QHBoxLayout* content_layout = new QHBoxLayout(content);
         content_layout->setContentsMargins(0, static_cast<int>(GAP), 0, 0);
-        content_layout->setSpacing(static_cast<int>(GAP));
+        content_layout->setSpacing(0);
 
         lane_list = new LaneListWidget(this);
         ruler = new TimelineRulerWidget(this);
@@ -1837,7 +1832,12 @@ public:
             SeekMusic(position_ms);
         });
 
-        QWidget* left_column = new QWidget(this);
+        QWidget* track_area = new QWidget(content);
+        QHBoxLayout* track_layout = new QHBoxLayout(track_area);
+        track_layout->setContentsMargins(0, 0, 0, 0);
+        track_layout->setSpacing(0);
+
+        QWidget* left_column = new QWidget(track_area);
         QVBoxLayout* left_layout = new QVBoxLayout(left_column);
         left_layout->setContentsMargins(0, 0, 0, 0);
         left_layout->setSpacing(0);
@@ -1847,7 +1847,7 @@ public:
         left_layout->addWidget(lane_list);
         left_column->setFixedWidth(static_cast<int>(LABEL_WIDTH));
 
-        QWidget* center_column = new QWidget(this);
+        QWidget* center_column = new QWidget(track_area);
         QVBoxLayout* center_layout = new QVBoxLayout(center_column);
         center_layout->setContentsMargins(0, 0, 0, 0);
         center_layout->setSpacing(0);
@@ -1879,8 +1879,11 @@ public:
         right_layout->addWidget(effects_list);
         right_column->setFixedWidth(static_cast<int>(SIDE_PANEL_WIDTH));
 
-        content_layout->addWidget(left_column);
-        content_layout->addWidget(center_column, 1);
+        track_layout->addWidget(left_column);
+        track_layout->addWidget(center_column, 1);
+
+        content_layout->addWidget(track_area, 1);
+        content_layout->addSpacing(static_cast<int>(GAP));
         content_layout->addWidget(right_column);
 
         page_layout->addWidget(toolbar);
