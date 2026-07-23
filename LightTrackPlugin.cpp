@@ -52,6 +52,7 @@
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
+#include <QStyledItemDelegate>
 #include <QStyleOptionGraphicsItem>
 #include <QTimer>
 #include <QTransform>
@@ -2072,6 +2073,46 @@ private:
     std::function<void(const QVector<int>&)> visibility_changed_callback;
 };
 
+QRect RemoveLeadingIndent(const QRect& rect, int indent, Qt::LayoutDirection direction)
+{
+    QRect adjusted_rect = rect;
+    if(direction == Qt::RightToLeft)
+    {
+        adjusted_rect.adjust(0, 0, indent, 0);
+    }
+    else
+    {
+        adjusted_rect.adjust(-indent, 0, 0, 0);
+    }
+    return adjusted_rect;
+}
+
+class EffectsListItemDelegate : public QStyledItemDelegate
+{
+public:
+    explicit EffectsListItemDelegate(QTreeView* view) :
+        QStyledItemDelegate(view),
+        view(view)
+    {
+    }
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+        const QModelIndex& index) const override
+    {
+        QStyleOptionViewItem adjusted_option(option);
+        if(index.parent().isValid())
+        {
+            adjusted_option.rect = RemoveLeadingIndent(
+                adjusted_option.rect, view->indentation(), adjusted_option.direction);
+        }
+
+        QStyledItemDelegate::paint(painter, adjusted_option, index);
+    }
+
+private:
+    const QTreeView* view;
+};
+
 class EffectsListWidget : public QTreeWidget
 {
 public:
@@ -2084,6 +2125,7 @@ public:
         setHeaderHidden(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setIndentation(16);
+        setItemDelegate(new EffectsListItemDelegate(this));
         setRootIsDecorated(true);
         setSelectionMode(QAbstractItemView::SingleSelection);
         setUniformRowHeights(true);
@@ -2113,7 +2155,24 @@ public:
         expandAll();
     }
 
+    QRect visualRect(const QModelIndex& index) const override
+    {
+        const QRect item_rect = QTreeWidget::visualRect(index);
+        return item_rect.isValid() && index.parent().isValid() ?
+            RemoveLeadingIndent(item_rect, indentation(), layoutDirection()) :
+            item_rect;
+    }
+
 protected:
+    void drawBranches(QPainter* painter, const QRect& rect,
+        const QModelIndex& index) const override
+    {
+        if(!index.parent().isValid())
+        {
+            QTreeWidget::drawBranches(painter, rect, index);
+        }
+    }
+
     void startDrag(Qt::DropActions) override
     {
         QTreeWidgetItem* item = currentItem();
