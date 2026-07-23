@@ -67,6 +67,7 @@ add_library(LightTrackPlugin SHARED
   LightTrackPlugin_global.h
   LightTrackPlugin.cpp
   LightTrackPlugin.h
+  LightTrackPlugin.qrc
   ${MINIAUDIO_DIR}/miniaudio.c
   LightTrackEffectCatalog.h
   LightTrackEffectCatalog.cpp

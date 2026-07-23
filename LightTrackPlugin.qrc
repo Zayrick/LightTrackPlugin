@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/lighttrack/fonts">
+    <file alias="lucide.ttf">resource/lucide.ttf</file>
+  </qresource>
+</RCC>

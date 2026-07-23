@@ -20,6 +20,7 @@
 #include <QDropEvent>
 #include <QEvent>
 #include <QFont>
+#include <QFontDatabase>
 #include <QFontMetrics>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -74,6 +75,8 @@ const char* EFFECT_MIME = "application/x-lighttrack-effect";
 
 const qreal PAGE_MARGIN = 10.0;
 const qreal GAP = 8.0;
+const qreal TOOLBAR_HEIGHT = 36.0;
+const qreal TOOLBAR_ICON_SIZE = 20.0;
 const qreal HEADER_HEIGHT = 42.0;
 const qreal RULER_HEIGHT = 30.0;
 const qreal LABEL_WIDTH = 238.0;
@@ -308,6 +311,35 @@ QLabel* HeaderLabel(const QString& text, QWidget* parent)
     label->setFont(font);
 
     return label;
+}
+
+QString LucideFontFamily()
+{
+    static const QString family = []()
+    {
+        const int font_id = QFontDatabase::addApplicationFont(":/lighttrack/fonts/lucide.ttf");
+        if(font_id < 0)
+        {
+            return QString();
+        }
+
+        const QStringList families = QFontDatabase::applicationFontFamilies(font_id);
+        return families.isEmpty() ? QString() : families.first();
+    }();
+
+    return family;
+}
+
+QPushButton* ToolbarButton(ushort codepoint, QWidget* parent)
+{
+    QPushButton* button = new QPushButton(QString(QChar(codepoint)), parent);
+    button->setFixedSize(static_cast<int>(TOOLBAR_HEIGHT), static_cast<int>(TOOLBAR_HEIGHT));
+
+    QFont font(LucideFontFamily());
+    font.setPixelSize(static_cast<int>(TOOLBAR_ICON_SIZE));
+    button->setFont(font);
+
+    return button;
 }
 
 class ClipPreviewItem : public QGraphicsItem
@@ -1721,10 +1753,49 @@ public:
         QWidget(parent),
         resource_manager(resource_manager)
     {
-        QHBoxLayout* page_layout = new QHBoxLayout(this);
+        QVBoxLayout* page_layout = new QVBoxLayout(this);
         page_layout->setContentsMargins(static_cast<int>(PAGE_MARGIN), static_cast<int>(PAGE_MARGIN),
             static_cast<int>(PAGE_MARGIN), static_cast<int>(PAGE_MARGIN));
-        page_layout->setSpacing(static_cast<int>(GAP));
+        page_layout->setSpacing(0);
+
+        QWidget* toolbar = new QWidget(this);
+        toolbar->setObjectName("lightTrackToolbar");
+        toolbar->setFixedHeight(static_cast<int>(TOOLBAR_HEIGHT));
+        toolbar->setStyleSheet(R"(
+            QWidget#lightTrackToolbar QPushButton {
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 8px;
+                padding: 0;
+            }
+
+            QWidget#lightTrackToolbar QPushButton:hover {
+                background-color: rgba(127, 127, 127, 45);
+            }
+
+            QWidget#lightTrackToolbar QPushButton:pressed {
+                background-color: rgba(127, 127, 127, 80);
+            }
+
+            QWidget#lightTrackToolbar QPushButton:focus {
+                border-color: rgba(127, 127, 127, 90);
+            }
+        )");
+        QHBoxLayout* toolbar_layout = new QHBoxLayout(toolbar);
+        toolbar_layout->setContentsMargins(0, 0, 0, 0);
+        toolbar_layout->setSpacing(0);
+        toolbar_layout->addWidget(ToolbarButton(0xE2A1, toolbar));
+        toolbar_layout->addWidget(ToolbarButton(0xE2A0, toolbar));
+        toolbar_layout->addStretch();
+
+        QFrame* toolbar_separator = new QFrame(this);
+        toolbar_separator->setFrameShape(QFrame::HLine);
+        toolbar_separator->setFrameShadow(QFrame::Sunken);
+
+        QWidget* content = new QWidget(this);
+        QHBoxLayout* content_layout = new QHBoxLayout(content);
+        content_layout->setContentsMargins(0, static_cast<int>(GAP), 0, 0);
+        content_layout->setSpacing(static_cast<int>(GAP));
 
         lane_list = new LaneListWidget(this);
         ruler = new TimelineRulerWidget(this);
@@ -1788,9 +1859,13 @@ public:
         right_layout->addWidget(effects_list);
         right_column->setFixedWidth(static_cast<int>(SIDE_PANEL_WIDTH));
 
-        page_layout->addWidget(left_column);
-        page_layout->addWidget(center_column, 1);
-        page_layout->addWidget(right_column);
+        content_layout->addWidget(left_column);
+        content_layout->addWidget(center_column, 1);
+        content_layout->addWidget(right_column);
+
+        page_layout->addWidget(toolbar);
+        page_layout->addWidget(toolbar_separator);
+        page_layout->addWidget(content, 1);
 
         connect(view->verticalScrollBar(), &QScrollBar::valueChanged, lane_list->verticalScrollBar(), &QScrollBar::setValue);
         connect(lane_list->verticalScrollBar(), &QScrollBar::valueChanged, view->verticalScrollBar(), &QScrollBar::setValue);
