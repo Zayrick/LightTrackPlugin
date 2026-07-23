@@ -334,6 +334,7 @@ QPushButton* ToolbarButton(ushort codepoint, QWidget* parent)
 {
     QPushButton* button = new QPushButton(QString(QChar(codepoint)), parent);
     button->setFixedSize(static_cast<int>(TOOLBAR_HEIGHT), static_cast<int>(TOOLBAR_HEIGHT));
+    button->setFocusPolicy(Qt::NoFocus);
 
     QFont font(LucideFontFamily());
     font.setPixelSize(static_cast<int>(TOOLBAR_ICON_SIZE));
@@ -1777,16 +1778,43 @@ public:
                 background-color: rgba(127, 127, 127, 80);
             }
 
-            QWidget#lightTrackToolbar QPushButton:focus {
-                border-color: rgba(127, 127, 127, 90);
+            QWidget#lightTrackToolbar QPushButton#toolbarMusicButton {
+                padding: 0 10px;
             }
         )");
         QHBoxLayout* toolbar_layout = new QHBoxLayout(toolbar);
         toolbar_layout->setContentsMargins(0, 0, 0, 0);
         toolbar_layout->setSpacing(0);
-        toolbar_layout->addWidget(ToolbarButton(0xE2A1, toolbar));
-        toolbar_layout->addWidget(ToolbarButton(0xE2A0, toolbar));
+
+        toolbar_left_group = new QWidget(toolbar);
+        toolbar_left_group->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+        QHBoxLayout* toolbar_left_layout = new QHBoxLayout(toolbar_left_group);
+        toolbar_left_layout->setContentsMargins(0, 0, 0, 0);
+        toolbar_left_layout->setSpacing(0);
+        toolbar_left_layout->addWidget(ToolbarButton(0xE2A1, toolbar_left_group));
+        toolbar_left_layout->addWidget(ToolbarButton(0xE2A0, toolbar_left_group));
+        toolbar_left_layout->addWidget(ToolbarButton(0xE14D, toolbar_left_group));
+
+        toolbar_right_group = new QWidget(toolbar);
+        toolbar_right_group->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+        QHBoxLayout* toolbar_right_layout = new QHBoxLayout(toolbar_right_group);
+        toolbar_right_layout->setContentsMargins(0, 0, 0, 0);
+        toolbar_right_layout->setSpacing(0);
+        toolbar_right_layout->addStretch();
+        toolbar_music_button = new QPushButton("Select Music File", toolbar_right_group);
+        toolbar_music_button->setObjectName("toolbarMusicButton");
+        toolbar_music_button->setFixedHeight(static_cast<int>(TOOLBAR_HEIGHT));
+        toolbar_music_button->setFocusPolicy(Qt::NoFocus);
+        toolbar_right_layout->addWidget(toolbar_music_button);
+        UpdateToolbarSideWidths();
+
+        toolbar_layout->addWidget(toolbar_left_group);
         toolbar_layout->addStretch();
+        toolbar_play_button = ToolbarButton(0xE13C, toolbar);
+        toolbar_play_button->setEnabled(false);
+        toolbar_layout->addWidget(toolbar_play_button);
+        toolbar_layout->addStretch();
+        toolbar_layout->addWidget(toolbar_right_group);
 
         QFrame* toolbar_separator = new QFrame(this);
         toolbar_separator->setFrameShape(QFrame::HLine);
@@ -1829,22 +1857,14 @@ public:
         timeline_header_layout->setContentsMargins(0, 0, 0, 0);
         timeline_header_layout->setSpacing(6);
         QLabel* timeline_title = HeaderLabel("Timeline", timeline_header);
-        music_label = new QLabel("No music", timeline_header);
-        music_label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        music_label->setAlignment(Qt::AlignVCenter | Qt::AlignRight);
-        choose_music_button = new QPushButton("Music...", timeline_header);
-        play_button = new QPushButton("Play", timeline_header);
         QSlider* zoom_slider = new QSlider(Qt::Horizontal, timeline_header);
         zoom_slider->setRange(static_cast<int>(TIMELINE_ZOOM_MIN), static_cast<int>(TIMELINE_ZOOM_MAX));
         zoom_slider->setValue(static_cast<int>(GRID_WIDTH));
         zoom_slider->setFixedWidth(120);
         zoom_slider->setToolTip("Timeline zoom");
-        play_button->setEnabled(false);
         timeline_header_layout->addWidget(timeline_title);
-        timeline_header_layout->addWidget(music_label, 1);
+        timeline_header_layout->addStretch();
         timeline_header_layout->addWidget(zoom_slider);
-        timeline_header_layout->addWidget(choose_music_button);
-        timeline_header_layout->addWidget(play_button);
         center_layout->addWidget(timeline_header);
         center_layout->addWidget(ruler);
         center_layout->addWidget(view);
@@ -1869,11 +1889,11 @@ public:
 
         connect(view->verticalScrollBar(), &QScrollBar::valueChanged, lane_list->verticalScrollBar(), &QScrollBar::setValue);
         connect(lane_list->verticalScrollBar(), &QScrollBar::valueChanged, view->verticalScrollBar(), &QScrollBar::setValue);
-        connect(choose_music_button, &QPushButton::clicked, this, [this]()
+        connect(toolbar_music_button, &QPushButton::clicked, this, [this]()
         {
             ChooseMusic();
         });
-        connect(play_button, &QPushButton::clicked, this, [this]()
+        connect(toolbar_play_button, &QPushButton::clicked, this, [this]()
         {
             ToggleMusicPlayback();
         });
@@ -2265,24 +2285,23 @@ private:
         CloseMusic();
         music_path = path;
         music_spectrum_preview.clear();
-        play_button->setText("Play");
-        play_button->setEnabled(false);
         view->SetMusicPosition(0);
 
         const QFileInfo file_info(path);
-        music_label->setText(file_info.fileName());
-        music_label->setToolTip(path);
+        toolbar_music_button->setText(file_info.fileName());
+        toolbar_music_button->setToolTip(path);
+        UpdateToolbarSideWidths();
 
         if(!OpenMusic(path))
         {
-            music_label->setText(file_info.fileName() + " (cannot play)");
+            toolbar_music_button->setToolTip(path + "\nCannot play this file");
             view->SetMusicSpectrum({}, 0);
             return;
         }
 
         music_spectrum_preview = BuildMusicSpectrumPreview(path);
         view->SetMusicSpectrum(music_spectrum_preview, music_duration_ms);
-        play_button->setEnabled(true);
+        SetPlaybackControls(true, false);
     }
 
     bool OpenMusic(const QString& path)
@@ -2345,7 +2364,7 @@ private:
             ma_sound_stop(&music_sound);
             music_timer->stop();
             music_playing = false;
-            play_button->setText("Play");
+            SetPlaybackControls(true, false);
             UpdateMusicPosition();
             return;
         }
@@ -2364,7 +2383,7 @@ private:
 
         music_timer->start();
         music_playing = true;
-        play_button->setText("Pause");
+        SetPlaybackControls(true, true);
         StartRuntime(MusicPositionMs());
     }
 
@@ -2462,11 +2481,7 @@ private:
         music_playing = false;
         music_duration_ms = 0;
 
-        if(play_button != nullptr)
-        {
-            play_button->setText("Play");
-            play_button->setEnabled(false);
-        }
+        SetPlaybackControls(false, false);
     }
 
     void FinishMusicPlayback()
@@ -2480,10 +2495,7 @@ private:
             ma_sound_stop(&music_sound);
         }
         music_playing = false;
-        if(play_button != nullptr)
-        {
-            play_button->setText("Play");
-        }
+        SetPlaybackControls(true, false);
         view->SetMusicPosition(music_duration_ms);
         StopRuntime();
     }
@@ -2512,15 +2524,11 @@ private:
         }
         view->SetMusicSpectrum({}, 0);
 
-        if(play_button != nullptr)
-        {
-            play_button->setText("Play");
-            play_button->setEnabled(false);
-        }
+        SetPlaybackControls(false, false);
 
-        if(music_label != nullptr)
+        if(toolbar_music_button != nullptr)
         {
-            music_label->setText(QFileInfo(music_path).fileName() + " (cannot play)");
+            toolbar_music_button->setToolTip(music_path + "\nCannot play this file");
         }
     }
 
@@ -2531,14 +2539,38 @@ private:
         view->SetLanes(lanes, empty_message);
     }
 
+    void UpdateToolbarSideWidths()
+    {
+        if(toolbar_left_group == nullptr || toolbar_right_group == nullptr || toolbar_music_button == nullptr)
+        {
+            return;
+        }
+
+        const int icon_group_width = static_cast<int>(TOOLBAR_HEIGHT * 3.0);
+        const int side_width = qMax(icon_group_width, toolbar_music_button->sizeHint().width());
+        toolbar_left_group->setFixedWidth(side_width);
+        toolbar_right_group->setFixedWidth(side_width);
+    }
+
+    void SetPlaybackControls(bool enabled, bool playing)
+    {
+        if(toolbar_play_button != nullptr)
+        {
+            const ushort codepoint = playing ? 0xE12E : 0xE13C;
+            toolbar_play_button->setEnabled(enabled);
+            toolbar_play_button->setText(QString(QChar(codepoint)));
+        }
+    }
+
     ResourceManagerInterface* resource_manager;
     LaneListWidget* lane_list;
     TimelineRulerWidget* ruler;
     LightTrackView* view;
     EffectsListWidget* effects_list;
-    QPushButton* choose_music_button = nullptr;
-    QPushButton* play_button = nullptr;
-    QLabel* music_label = nullptr;
+    QWidget* toolbar_left_group = nullptr;
+    QWidget* toolbar_right_group = nullptr;
+    QPushButton* toolbar_music_button = nullptr;
+    QPushButton* toolbar_play_button = nullptr;
     QTimer* music_timer = nullptr;
     ma_engine music_engine;
     ma_sound music_sound;
