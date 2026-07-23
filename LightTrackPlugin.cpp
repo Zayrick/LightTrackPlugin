@@ -37,6 +37,7 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsView>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
 #include <QMetaObject>
@@ -52,7 +53,6 @@
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
-#include <QStyledItemDelegate>
 #include <QStyleOptionGraphicsItem>
 #include <QTimer>
 #include <QTransform>
@@ -84,7 +84,7 @@ const qreal TOOLBAR_ICON_SIZE = 20.0;
 const qreal HEADER_HEIGHT = 42.0;
 const qreal RULER_HEIGHT = 30.0;
 const qreal LABEL_WIDTH = 238.0;
-const qreal ROW_HEIGHT = 52.0;
+const qreal ROW_HEIGHT = 36.0;
 const qreal TIMELINE_MIN_WIDTH = 900.0;
 const qreal SIDE_PANEL_WIDTH = 178.0;
 const qreal EFFECT_ROW_HEIGHT = 28.0;
@@ -2073,59 +2073,24 @@ private:
     std::function<void(const QVector<int>&)> visibility_changed_callback;
 };
 
-QRect RemoveLeadingIndent(const QRect& rect, int indent, Qt::LayoutDirection direction)
-{
-    QRect adjusted_rect = rect;
-    if(direction == Qt::RightToLeft)
-    {
-        adjusted_rect.adjust(0, 0, indent, 0);
-    }
-    else
-    {
-        adjusted_rect.adjust(-indent, 0, 0, 0);
-    }
-    return adjusted_rect;
-}
-
-class EffectsListItemDelegate : public QStyledItemDelegate
-{
-public:
-    explicit EffectsListItemDelegate(QTreeView* view) :
-        QStyledItemDelegate(view),
-        view(view)
-    {
-    }
-
-    void paint(QPainter* painter, const QStyleOptionViewItem& option,
-        const QModelIndex& index) const override
-    {
-        QStyleOptionViewItem adjusted_option(option);
-        if(index.parent().isValid())
-        {
-            adjusted_option.rect = RemoveLeadingIndent(
-                adjusted_option.rect, view->indentation(), adjusted_option.direction);
-        }
-
-        QStyledItemDelegate::paint(painter, adjusted_option, index);
-    }
-
-private:
-    const QTreeView* view;
-};
-
 class EffectsListWidget : public QTreeWidget
 {
 public:
     explicit EffectsListWidget(QWidget* parent = nullptr) :
         QTreeWidget(parent)
     {
-        setColumnCount(1);
+        setColumnCount(2);
         setDragEnabled(true);
         setFrameShape(QFrame::NoFrame);
         setHeaderHidden(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setIndentation(16);
-        setItemDelegate(new EffectsListItemDelegate(this));
+        setTreePosition(0);
+        header()->setMinimumSectionSize(indentation());
+        header()->setStretchLastSection(false);
+        header()->setSectionResizeMode(0, QHeaderView::Fixed);
+        header()->setSectionResizeMode(1, QHeaderView::Stretch);
+        header()->resizeSection(0, indentation());
         setRootIsDecorated(true);
         setSelectionMode(QAbstractItemView::SingleSelection);
         setUniformRowHeights(true);
@@ -2136,43 +2101,28 @@ public:
 
         for(const LightTrackEffectGroup& group : EffectGroups())
         {
-            QTreeWidgetItem* group_item = new QTreeWidgetItem(this, QStringList(group.name));
+            QTreeWidgetItem* group_item = new QTreeWidgetItem(this);
+            group_item->setText(1, group.name);
             group_item->setFlags(Qt::ItemIsEnabled);
-            group_item->setSizeHint(0, QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
-            group_item->setToolTip(0, group.name);
+            group_item->setSizeHint(1, QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
+            group_item->setToolTip(1, group.name);
 
             for(const LightTrackEffectInfo& effect : group.effects)
             {
-                QTreeWidgetItem* item = new QTreeWidgetItem(group_item, QStringList(effect.name));
-                item->setData(0, EffectIdRole, effect.id.toUtf8());
-                item->setIcon(0, ColorIcon(effect.color));
-                item->setToolTip(0, group.name + QStringLiteral(" / ") + effect.name);
+                QTreeWidgetItem* item = new QTreeWidgetItem(group_item);
+                item->setText(1, effect.name);
+                item->setData(1, EffectIdRole, effect.id.toUtf8());
+                item->setIcon(1, ColorIcon(effect.color));
+                item->setToolTip(1, group.name + QStringLiteral(" / ") + effect.name);
                 item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
-                item->setSizeHint(0, QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
+                item->setSizeHint(1, QSize(0, static_cast<int>(EFFECT_ROW_HEIGHT)));
             }
         }
 
         expandAll();
     }
 
-    QRect visualRect(const QModelIndex& index) const override
-    {
-        const QRect item_rect = QTreeWidget::visualRect(index);
-        return item_rect.isValid() && index.parent().isValid() ?
-            RemoveLeadingIndent(item_rect, indentation(), layoutDirection()) :
-            item_rect;
-    }
-
 protected:
-    void drawBranches(QPainter* painter, const QRect& rect,
-        const QModelIndex& index) const override
-    {
-        if(!index.parent().isValid())
-        {
-            QTreeWidget::drawBranches(painter, rect, index);
-        }
-    }
-
     void startDrag(Qt::DropActions) override
     {
         QTreeWidgetItem* item = currentItem();
@@ -2182,7 +2132,7 @@ protected:
         }
 
         QMimeData* mime_data = new QMimeData();
-        mime_data->setData(EFFECT_MIME, item->data(0, EffectIdRole).toByteArray());
+        mime_data->setData(EFFECT_MIME, item->data(1, EffectIdRole).toByteArray());
 
         QDrag* drag = new QDrag(this);
         drag->setMimeData(mime_data);
