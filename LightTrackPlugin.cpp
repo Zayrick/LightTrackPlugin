@@ -39,6 +39,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMetaObject>
 #include <QMimeData>
@@ -95,9 +96,6 @@ const qreal GRID_WIDTH = 80.0;
 const qreal TIMELINE_ZOOM_MIN = 40.0;
 const qreal TIMELINE_ZOOM_MAX = 240.0;
 const qreal RESIZE_HANDLE_WIDTH = 9.0;
-const qreal CLIP_DRAG_HANDLE_WIDTH = 22.0;
-const qreal REMOVE_BUTTON_SIZE = 18.0;
-const qreal REMOVE_BUTTON_RIGHT_MARGIN = RESIZE_HANDLE_WIDTH + 8.0;
 const qreal PLAYHEAD_HANDLE_RADIUS = 6.0;
 const int MUSIC_SPECTRUM_BARS = 1200;
 
@@ -178,6 +176,33 @@ QColor WithAlpha(QColor color, int alpha)
 QColor TextLineColor(const QPalette& palette, int light_alpha, int dark_alpha)
 {
     return WithAlpha(palette.color(QPalette::Text), palette.color(QPalette::Window).lightness() < 128 ? dark_alpha : light_alpha);
+}
+
+void PaintClipCard(QPainter* painter, const QRectF& rect, const EffectDefinition& effect,
+    bool preview, bool selected = false)
+{
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+
+    const qreal border_width = selected ? 2.0 : 1.0;
+    const QRectF card_rect = rect.adjusted(border_width / 2.0, border_width / 2.0,
+        -border_width / 2.0, -border_width / 2.0);
+    painter->setBrush(WithAlpha(effect.color, preview ? 48 : (selected ? 245 : 230)));
+    painter->setPen(QPen(selected ? WithAlpha(Qt::white, 245)
+                                 : WithAlpha(effect.color.darker(110), preview ? 145 : 220),
+        border_width, preview ? Qt::DashLine : Qt::SolidLine));
+    painter->drawRoundedRect(card_rect, 5.0, 5.0);
+
+    QFont font = painter->font();
+    font.setBold(true);
+    painter->setFont(font);
+    painter->setPen(WithAlpha(Qt::white, preview ? 150 : 255));
+
+    const QRectF text_rect = card_rect.adjusted(9.0, 0.0, -9.0, 0.0);
+    const int text_width = qMax(0, static_cast<int>(std::floor(text_rect.width())));
+    painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft,
+        QFontMetrics(font).elidedText(effect.name, Qt::ElideRight, text_width));
+    painter->restore();
 }
 
 QVector<qreal> BuildMusicSpectrumPreview(const QString& path)
@@ -805,18 +830,7 @@ public:
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override
     {
-        painter->setRenderHint(QPainter::Antialiasing, true);
-        painter->setBrush(WithAlpha(effect.color, 48));
-        painter->setPen(QPen(WithAlpha(effect.color.darker(110), 145), 1.0, Qt::DashLine));
-        painter->drawRoundedRect(QRectF(0.0, 0.0, width, CLIP_HEIGHT), 5.0, 5.0);
-
-        painter->setPen(WithAlpha(Qt::white, 150));
-        QFont font = painter->font();
-        font.setBold(true);
-        painter->setFont(font);
-        const QRectF text_rect(9.0, 0.0, qMax<qreal>(0.0, width - 18.0), CLIP_HEIGHT);
-        painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft,
-            QFontMetrics(font).elidedText(effect.name, Qt::ElideRight, static_cast<int>(text_rect.width())));
+        PaintClipCard(painter, QRectF(0.0, 0.0, width, CLIP_HEIGHT), effect, true);
     }
 
 private:
@@ -879,11 +893,11 @@ private:
 class TimelineClipItem : public QGraphicsItem
 {
 public:
-    explicit TimelineClipItem(const EffectDefinition& effect, bool removable = true) :
-        effect(effect),
-        removable(removable)
+    explicit TimelineClipItem(const EffectDefinition& effect) :
+        effect(effect)
     {
-        setAcceptHoverEvents(removable);
+        setAcceptHoverEvents(true);
+        setFlag(QGraphicsItem::ItemIsSelectable, true);
         setCursor(Qt::OpenHandCursor);
         setZValue(35.0);
     }
@@ -893,86 +907,27 @@ public:
         return QRectF(0.0, 0.0, width, CLIP_HEIGHT);
     }
 
-    void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget*) override
     {
-        painter->setRenderHint(QPainter::Antialiasing, true);
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(effect.color);
-        painter->drawRoundedRect(boundingRect(), 5.0, 5.0);
-
-        if(removable)
-        {
-            const QRectF handle_rect = DragHandleRect();
-            painter->setPen(QPen(WithAlpha(Qt::white, 70), 1.0));
-            painter->drawLine(QPointF(handle_rect.right(), 7.0), QPointF(handle_rect.right(), CLIP_HEIGHT - 7.0));
-            painter->setPen(Qt::NoPen);
-            painter->setBrush(WithAlpha(Qt::white, 150));
-
-            for(int row = 0; row < 3; row++)
-            {
-                for(int column = 0; column < 2; column++)
-                {
-                    painter->drawEllipse(QPointF(7.5 + column * 6.0, 10.0 + row * 6.0), 1.35, 1.35);
-                }
-            }
-
-            painter->setPen(QPen(WithAlpha(Qt::white, 75), 1.0));
-            painter->drawLine(QPointF(width - RESIZE_HANDLE_WIDTH, 7.0), QPointF(width - RESIZE_HANDLE_WIDTH, CLIP_HEIGHT - 7.0));
-        }
-
-        painter->setPen(Qt::white);
-        QFont font = painter->font();
-        font.setBold(true);
-        painter->setFont(font);
-
-        const qreal text_left = removable ? CLIP_DRAG_HANDLE_WIDTH + 7.0 : 9.0;
-        const qreal text_right = removable ? RemoveRect().left() - 7.0 : width - 12.0;
-        const QRectF text_rect = QRectF(text_left, 0.0, qMax<qreal>(0.0, text_right - text_left), CLIP_HEIGHT);
-        const QString label = QFontMetrics(font).elidedText(effect.name, Qt::ElideRight, static_cast<int>(text_rect.width()));
-        painter->drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, label);
-
-        if(removable)
-        {
-            const QRectF close_rect = RemoveRect();
-            if(hover_remove)
-            {
-                painter->setBrush(WithAlpha(Qt::white, 22));
-                painter->setPen(QPen(WithAlpha(Qt::white, 180), 1.0));
-                painter->drawRoundedRect(close_rect.adjusted(0.5, 0.5, -0.5, -0.5), 3.0, 3.0);
-            }
-
-            painter->setPen(QPen(Qt::white, 1.6, Qt::SolidLine, Qt::RoundCap));
-            painter->drawLine(close_rect.topLeft() + QPointF(4.0, 4.0), close_rect.bottomRight() - QPointF(4.0, 4.0));
-            painter->drawLine(close_rect.topRight() + QPointF(-4.0, 4.0), close_rect.bottomLeft() + QPointF(4.0, -4.0));
-        }
+        const bool selected = option != nullptr && (option->state & QStyle::State_Selected);
+        PaintClipCard(painter, boundingRect(), effect, false, selected);
     }
 
     void hoverMoveEvent(QGraphicsSceneHoverEvent* event) override
     {
-        SetRemoveHover(IsRemoveButton(event->pos()));
-
         if(IsResizeHandle(event->pos()))
         {
             setCursor(Qt::SizeHorCursor);
         }
-        else if(IsRemoveButton(event->pos()))
-        {
-            setCursor(Qt::PointingHandCursor);
-        }
-        else if(IsDragHandle(event->pos()))
-        {
-            setCursor(Qt::OpenHandCursor);
-        }
         else
         {
-            unsetCursor();
+            setCursor(Qt::OpenHandCursor);
         }
     }
 
     void hoverLeaveEvent(QGraphicsSceneHoverEvent*) override
     {
-        SetRemoveHover(false);
-        unsetCursor();
+        setCursor(Qt::OpenHandCursor);
     }
 
     EffectDefinition Effect() const
@@ -1004,46 +959,23 @@ public:
 
     bool IsResizeHandle(const QPointF& pos) const
     {
-        return removable && pos.x() >= width - RESIZE_HANDLE_WIDTH;
+        return IsLeftResizeHandle(pos) || IsRightResizeHandle(pos);
     }
 
-    bool IsDragHandle(const QPointF& pos) const
+    bool IsLeftResizeHandle(const QPointF& pos) const
     {
-        return removable && DragHandleRect().contains(pos);
+        return pos.x() <= RESIZE_HANDLE_WIDTH;
     }
 
-    bool IsRemoveButton(const QPointF& pos) const
+    bool IsRightResizeHandle(const QPointF& pos) const
     {
-        return removable && RemoveRect().contains(pos);
+        return pos.x() >= width - RESIZE_HANDLE_WIDTH;
     }
 
 private:
-    QRectF DragHandleRect() const
-    {
-        return QRectF(0.0, 0.0, CLIP_DRAG_HANDLE_WIDTH, CLIP_HEIGHT);
-    }
-
-    QRectF RemoveRect() const
-    {
-        return QRectF(width - REMOVE_BUTTON_RIGHT_MARGIN - REMOVE_BUTTON_SIZE, 7.0, REMOVE_BUTTON_SIZE, REMOVE_BUTTON_SIZE);
-    }
-
-    void SetRemoveHover(bool hover)
-    {
-        if(hover_remove == hover)
-        {
-            return;
-        }
-
-        hover_remove = hover;
-        update(RemoveRect().adjusted(-2.0, -2.0, 2.0, 2.0));
-    }
-
     EffectDefinition effect;
     int lane_index = 0;
     qreal width = CLIP_DEFAULT_WIDTH;
-    bool removable = true;
-    bool hover_remove = false;
 };
 
 class LightTrackScene : public QGraphicsScene
@@ -1235,6 +1167,25 @@ public:
         HidePreview();
     }
 
+    bool DeleteSelectedClips()
+    {
+        QVector<TimelineClipItem*> selected_clips;
+        for(TimelineClipItem* clip : clips)
+        {
+            if(clip->isSelected())
+            {
+                selected_clips.push_back(clip);
+            }
+        }
+
+        for(TimelineClipItem* clip : selected_clips)
+        {
+            RemoveClip(clip);
+        }
+
+        return !selected_clips.empty();
+    }
+
 protected:
     void drawBackground(QPainter* painter, const QRectF& rect) override
     {
@@ -1286,6 +1237,7 @@ protected:
 
         if(IsPlayheadHandle(event->scenePos()))
         {
+            clearSelection();
             drag_mode = PlayheadSeek;
             SeekMusicAt(event->scenePos().x());
             event->accept();
@@ -1295,27 +1247,29 @@ protected:
         TimelineClipItem* clip = ClipAt(event->scenePos());
         if(clip == nullptr)
         {
+            clearSelection();
             QGraphicsScene::mousePressEvent(event);
             return;
         }
 
         const QPointF local_pos = clip->mapFromScene(event->scenePos());
-
-        if(clip->IsRemoveButton(local_pos))
-        {
-            RemoveClip(clip);
-            event->accept();
-            return;
-        }
-
-        if(!clip->IsResizeHandle(local_pos) && !clip->IsDragHandle(local_pos))
-        {
-            event->accept();
-            return;
-        }
+        clearSelection();
+        clip->setSelected(true);
 
         active_clip = clip;
-        drag_mode = clip->IsResizeHandle(local_pos) ? ClipResize : ClipMove;
+        if(clip->IsLeftResizeHandle(local_pos))
+        {
+            drag_mode = ClipResizeLeft;
+        }
+        else if(clip->IsRightResizeHandle(local_pos))
+        {
+            drag_mode = ClipResizeRight;
+        }
+        else
+        {
+            drag_mode = ClipMove;
+        }
+
         drag_offset = local_pos;
         drag_scene_start = event->scenePos();
         clip_start_x = clip->pos().x();
@@ -1344,7 +1298,7 @@ protected:
             return;
         }
 
-        if(drag_mode == ClipResize)
+        if(drag_mode == ClipResizeLeft || drag_mode == ClipResizeRight)
         {
             UpdateClipResize(event->scenePos());
             event->accept();
@@ -1370,7 +1324,7 @@ protected:
             return;
         }
 
-        if(drag_mode == ClipMove || drag_mode == ClipResize)
+        if(drag_mode == ClipMove || drag_mode == ClipResizeLeft || drag_mode == ClipResizeRight)
         {
             if(active_clip != nullptr)
             {
@@ -1393,7 +1347,8 @@ private:
     {
         NoDrag,
         ClipMove,
-        ClipResize,
+        ClipResizeLeft,
+        ClipResizeRight,
         PlayheadSeek
     };
 
@@ -1734,10 +1689,26 @@ private:
         }
 
         const int lane = active_clip->LaneIndex();
-        const qreal max_width = lanes[lane].rect.right() - clip_start_x;
-        const qreal width = qBound(CLIP_MIN_WIDTH, clip_start_width + pos.x() - drag_scene_start.x(), max_width);
+        qreal x = clip_start_x;
+        qreal width = clip_start_width;
+
+        if(drag_mode == ClipResizeLeft)
+        {
+            const qreal right = clip_start_x + clip_start_width;
+            x = qBound(lanes[lane].rect.left(),
+                clip_start_x + pos.x() - drag_scene_start.x(), right - CLIP_MIN_WIDTH);
+            width = right - x;
+        }
+        else
+        {
+            const qreal max_width = lanes[lane].rect.right() - clip_start_x;
+            width = qBound(CLIP_MIN_WIDTH,
+                clip_start_width + pos.x() - drag_scene_start.x(), max_width);
+        }
+
         active_clip->SetClipWidth(width);
-        ShowPreview(lane, clip_start_x, width, active_clip->Effect());
+        active_clip->setPos(x, ClipY(lane));
+        ShowPreview(lane, x, width, active_clip->Effect());
     }
 
     void ShowPreview(int lane, qreal x, qreal width, const EffectDefinition& effect)
@@ -1794,14 +1765,16 @@ private:
 
     void RemoveClip(TimelineClipItem* clip)
     {
-        clips.removeOne(clip);
-        removeItem(clip);
-        delete clip;
-
         if(active_clip == clip)
         {
             active_clip = nullptr;
+            HidePreview();
+            drag_mode = NoDrag;
         }
+
+        clips.removeOne(clip);
+        removeItem(clip);
+        delete clip;
 
         RefreshInheritedClips();
     }
@@ -2163,6 +2136,7 @@ public:
     {
         setScene(light_scene);
         setAcceptDrops(true);
+        setFocusPolicy(Qt::StrongFocus);
         setAlignment(Qt::AlignLeft | Qt::AlignTop);
         setDragMode(QGraphicsView::NoDrag);
         setFrameShape(QFrame::NoFrame);
@@ -2242,6 +2216,17 @@ public:
     }
 
 protected:
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if(event->key() == Qt::Key_Delete && light_scene->DeleteSelectedClips())
+        {
+            event->accept();
+            return;
+        }
+
+        QGraphicsView::keyPressEvent(event);
+    }
+
     void resizeEvent(QResizeEvent* event) override
     {
         QGraphicsView::resizeEvent(event);
