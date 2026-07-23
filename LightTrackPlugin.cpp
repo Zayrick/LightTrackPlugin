@@ -117,7 +117,8 @@ struct LaneInfo
 
 enum EffectListRole
 {
-    EffectIdRole = Qt::UserRole + 1
+    EffectIdRole = Qt::UserRole + 1,
+    LaneIndexRole
 };
 
 class TimelineClipItem;
@@ -1074,7 +1075,38 @@ public:
         CancelDrag();
         ClearClips();
         lane_entries = entries;
+        visible_lane_indices.clear();
+        visible_lane_indices.reserve(lane_entries.size());
+        for(int i = 0; i < lane_entries.size(); i++)
+        {
+            visible_lane_indices.push_back(i);
+        }
         empty_message = empty_text;
+        RebuildLayout();
+    }
+
+    void SetVisibleLanes(const QVector<int>& indices)
+    {
+        QVector<int> filtered_indices;
+        filtered_indices.reserve(indices.size());
+
+        for(int index : indices)
+        {
+            if(index >= 0 && index < lane_entries.size() && !filtered_indices.contains(index))
+            {
+                filtered_indices.push_back(index);
+            }
+        }
+
+        if(filtered_indices.size() == visible_lane_indices.size()
+            && std::equal(filtered_indices.cbegin(), filtered_indices.cend(),
+                visible_lane_indices.cbegin()))
+        {
+            return;
+        }
+
+        CancelDrag();
+        visible_lane_indices = filtered_indices;
         RebuildLayout();
     }
 
@@ -1232,14 +1264,11 @@ protected:
             return;
         }
 
-        const int first_lane = qMax(0, static_cast<int>(std::floor((rect.top() - ROW_HEIGHT) / ROW_HEIGHT)));
-        const int last_lane = qMin(lane_entries.size() - 1, static_cast<int>(std::floor((rect.bottom() - ROW_HEIGHT) / ROW_HEIGHT)));
-
-        for(int i = first_lane; i <= last_lane; i++)
+        for(int lane_index : visible_lane_indices)
         {
             const QColor row_color = palette.color(QPalette::Base);
 
-            PaintRow(painter, QRectF(0.0, ROW_HEIGHT + i * ROW_HEIGHT, sceneRect().width(), ROW_HEIGHT),
+            PaintRow(painter, lanes[lane_index].rect,
                 row_color, TextLineColor(palette, 38, 72), TextLineColor(palette, 20, 38), rect);
         }
 
@@ -1412,7 +1441,7 @@ private:
         ClearLayoutItems();
         lanes.clear();
 
-        const int lane_count = qMax(1, lane_entries.size());
+        const int lane_count = qMax(1, visible_lane_indices.size());
         const qreal content_height = ROW_HEIGHT + lane_count * ROW_HEIGHT;
         const qreal scene_width = qMax(qMax<qreal>(TIMELINE_MIN_WIDTH, viewport_size.width()), MusicPixelWidth());
         const qreal scene_height = qMax<qreal>(content_height, viewport_size.height());
@@ -1421,7 +1450,14 @@ private:
 
         for(int i = 0; i < lane_entries.size(); i++)
         {
-            lanes.push_back({lane_entries[i].name, QRectF(0.0, ROW_HEIGHT + i * ROW_HEIGHT, scene_width, ROW_HEIGHT), lane_entries[i].level});
+            lanes.push_back({lane_entries[i].name, QRectF(), lane_entries[i].level});
+        }
+
+        for(int visible_row = 0; visible_row < visible_lane_indices.size(); visible_row++)
+        {
+            const int lane_index = visible_lane_indices[visible_row];
+            lanes[lane_index].rect = QRectF(0.0, ROW_HEIGHT + visible_row * ROW_HEIGHT,
+                scene_width, ROW_HEIGHT);
         }
 
         invalidate(sceneRect(), QGraphicsScene::BackgroundLayer);
@@ -1476,6 +1512,14 @@ private:
 
             const int lane = qBound(0, clip->LaneIndex(), lanes.size() - 1);
             clip->SetLaneIndex(lane);
+
+            if(!lanes[lane].rect.isValid() || lanes[lane].rect.isEmpty())
+            {
+                clip->setVisible(false);
+                continue;
+            }
+
+            clip->setVisible(true);
             const qreal x = ClampClipX(lane, clip->pos().x(), clip->ClipWidth());
             clip->setPos(x, ClipY(lane));
         }
@@ -1777,6 +1821,7 @@ private:
     QPalette palette;
     QSize viewport_size;
     QVector<LaneEntry> lane_entries;
+    QVector<int> visible_lane_indices;
     QVector<LaneInfo> lanes;
     QVector<QGraphicsItem*> layout_items;
     QVector<TimelineClipItem*> clips;
@@ -1894,19 +1939,30 @@ public:
         setHeaderHidden(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setIndentation(18);
-        setItemsExpandable(false);
+        setItemsExpandable(true);
         setRootIsDecorated(true);
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setSelectionMode(QAbstractItemView::NoSelection);
         setUniformRowHeights(true);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+
+        connect(this, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem*)
+        {
+            NotifyVisibleLanesChanged();
+        });
+        connect(this, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem*)
+        {
+            NotifyVisibleLanesChanged();
+        });
     }
 
     void SetLanes(const QVector<LaneEntry>& lanes)
     {
+        rebuilding = true;
         clear();
 
         QTreeWidgetItem* music_item = new QTreeWidgetItem(this, QStringList("Music"));
+        music_item->setData(0, LaneIndexRole, -1);
         music_item->setFlags(Qt::ItemIsEnabled);
         music_item->setSizeHint(0, QSize(0, static_cast<int>(ROW_HEIGHT)));
         music_item->setToolTip(0, "Music");
@@ -1914,8 +1970,9 @@ public:
         QTreeWidgetItem* controller_item = nullptr;
         QTreeWidgetItem* zone_item = nullptr;
 
-        for(const LaneEntry& lane : lanes)
+        for(int lane_index = 0; lane_index < lanes.size(); lane_index++)
         {
+            const LaneEntry& lane = lanes[lane_index];
             QTreeWidgetItem* parent_item = nullptr;
             if(lane.level == 1)
             {
@@ -1930,6 +1987,7 @@ public:
                 new QTreeWidgetItem(parent_item, QStringList(lane.name)) :
                 new QTreeWidgetItem(this, QStringList(lane.name));
 
+            item->setData(0, LaneIndexRole, lane_index);
             item->setFlags(Qt::ItemIsEnabled);
             item->setSizeHint(0, QSize(0, static_cast<int>(ROW_HEIGHT)));
             item->setToolTip(0, lane.name);
@@ -1946,7 +2004,72 @@ public:
         }
 
         expandAll();
+        rebuilding = false;
     }
+
+    void SetVisibilityChangedCallback(std::function<void(const QVector<int>&)> callback)
+    {
+        visibility_changed_callback = std::move(callback);
+    }
+
+    QVector<int> VisibleLaneIndices() const
+    {
+        QVector<int> indices;
+
+        for(int i = 0; i < topLevelItemCount(); i++)
+        {
+            AppendVisibleLaneIndices(topLevelItem(i), indices);
+        }
+
+        return indices;
+    }
+
+protected:
+    void drawRow(QPainter* painter, const QStyleOptionViewItem& option,
+        const QModelIndex& index) const override
+    {
+        QTreeWidget::drawRow(painter, option, index);
+
+        const bool is_music_row = !index.parent().isValid() && index.row() == 0;
+        painter->save();
+        painter->setPen(QPen(TextLineColor(palette(), is_music_row ? 52 : 38,
+            is_music_row ? 82 : 72)));
+        const qreal separator_y = option.rect.y() + option.rect.height() - 0.5;
+        painter->drawLine(QPointF(option.rect.left(), separator_y),
+            QPointF(option.rect.right() + 1.0, separator_y));
+        painter->restore();
+    }
+
+private:
+    void AppendVisibleLaneIndices(const QTreeWidgetItem* item, QVector<int>& indices) const
+    {
+        const int lane_index = item->data(0, LaneIndexRole).toInt();
+        if(lane_index >= 0)
+        {
+            indices.push_back(lane_index);
+        }
+
+        if(!item->isExpanded())
+        {
+            return;
+        }
+
+        for(int i = 0; i < item->childCount(); i++)
+        {
+            AppendVisibleLaneIndices(item->child(i), indices);
+        }
+    }
+
+    void NotifyVisibleLanesChanged()
+    {
+        if(!rebuilding && visibility_changed_callback)
+        {
+            visibility_changed_callback(VisibleLaneIndices());
+        }
+    }
+
+    bool rebuilding = false;
+    std::function<void(const QVector<int>&)> visibility_changed_callback;
 };
 
 class EffectsListWidget : public QTreeWidget
@@ -2064,6 +2187,12 @@ public:
     void SetLanes(const QVector<LaneEntry>& lanes, const QString& empty_text)
     {
         light_scene->SetLanes(lanes, empty_text);
+        SyncRuler();
+    }
+
+    void SetVisibleLanes(const QVector<int>& lane_indices)
+    {
+        light_scene->SetVisibleLanes(lane_indices);
         SyncRuler();
     }
 
@@ -2273,6 +2402,10 @@ public:
         view->SetMusicSeekCallback([this](qint64 position_ms)
         {
             SeekMusic(position_ms);
+        });
+        lane_list->SetVisibilityChangedCallback([this](const QVector<int>& lane_indices)
+        {
+            view->SetVisibleLanes(lane_indices);
         });
 
         QWidget* track_area = new QWidget(content);
@@ -2983,6 +3116,7 @@ private:
         current_lanes = lanes;
         lane_list->SetLanes(lanes);
         view->SetLanes(lanes, empty_message);
+        view->SetVisibleLanes(lane_list->VisibleLaneIndices());
     }
 
     void UpdateToolbarSideWidths()
