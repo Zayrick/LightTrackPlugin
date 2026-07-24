@@ -82,7 +82,6 @@ const qreal PAGE_MARGIN = 10.0;
 const qreal GAP = 8.0;
 const qreal TOOLBAR_HEIGHT = 36.0;
 const qreal TOOLBAR_ICON_SIZE = 20.0;
-const qreal HEADER_HEIGHT = 42.0;
 const qreal RULER_HEIGHT = 30.0;
 const qreal LABEL_WIDTH = 238.0;
 const qreal ROW_HEIGHT = 36.0;
@@ -95,6 +94,7 @@ const qreal CLIP_DEFAULT_WIDTH = 130.0;
 const qreal GRID_WIDTH = 80.0;
 const qreal TIMELINE_ZOOM_MIN = 40.0;
 const qreal TIMELINE_ZOOM_MAX = 240.0;
+const qreal TIMELINE_TICK_TARGET_WIDTH = 90.0;
 const qreal RESIZE_HANDLE_WIDTH = 9.0;
 const qreal PLAYHEAD_HANDLE_RADIUS = 6.0;
 const int MUSIC_SPECTRUM_BARS = 1200;
@@ -176,6 +176,56 @@ QColor WithAlpha(QColor color, int alpha)
 QColor TextLineColor(const QPalette& palette, int light_alpha, int dark_alpha)
 {
     return WithAlpha(palette.color(QPalette::Text), palette.color(QPalette::Window).lightness() < 128 ? dark_alpha : light_alpha);
+}
+
+qint64 TimelineTickIntervalMs(qreal pixels_per_second)
+{
+    if(pixels_per_second <= 0.0)
+    {
+        return 1000;
+    }
+
+    const qreal raw_interval_ms = TIMELINE_TICK_TARGET_WIDTH * 1000.0 / pixels_per_second;
+    const qreal magnitude = std::pow(10.0, std::floor(std::log10(raw_interval_ms)));
+    const qreal normalized_interval = raw_interval_ms / magnitude;
+
+    qreal multiplier = 1.0;
+    if(normalized_interval >= std::sqrt(50.0))
+    {
+        multiplier = 10.0;
+    }
+    else if(normalized_interval >= std::sqrt(10.0))
+    {
+        multiplier = 5.0;
+    }
+    else if(normalized_interval >= std::sqrt(2.0))
+    {
+        multiplier = 2.0;
+    }
+
+    return qMax<qint64>(1, qRound64(multiplier * magnitude));
+}
+
+QString FormatTimelineTime(qint64 time_ms, qint64 tick_interval_ms)
+{
+    int decimal_places = 0;
+    if(tick_interval_ms < 1000)
+    {
+        decimal_places = tick_interval_ms % 100 == 0 ? 1 :
+            (tick_interval_ms % 10 == 0 ? 2 : 3);
+    }
+
+    QString value = QString::number(static_cast<qreal>(time_ms) / 1000.0, 'f', decimal_places);
+    while(value.contains('.') && value.endsWith('0'))
+    {
+        value.chop(1);
+    }
+    if(value.endsWith('.'))
+    {
+        value.chop(1);
+    }
+
+    return value + "s";
 }
 
 void PaintClipCard(QPainter* painter, const QRectF& rect, const EffectDefinition& effect,
@@ -1443,11 +1493,20 @@ private:
             return;
         }
 
+        const qint64 tick_interval_ms = TimelineTickIntervalMs(pixels_per_second);
+        const qreal tick_width = tick_interval_ms * pixels_per_second / 1000.0;
         painter->setPen(QPen(grid));
-        const qreal first_x = std::ceil(qMax(pixels_per_second, exposed.left()) / pixels_per_second) * pixels_per_second;
+        const qint64 first_tick = static_cast<qint64>(
+            std::ceil(qMax(tick_width, exposed.left()) / tick_width));
 
-        for(qreal x = first_x; x < row_rect.right() && x <= exposed.right(); x += pixels_per_second)
+        for(qint64 tick = first_tick;; tick++)
         {
+            const qreal x = tick * tick_width;
+            if(x >= row_rect.right() || x > exposed.right())
+            {
+                break;
+            }
+
             painter->drawLine(QPointF(x, row_rect.top() + 1.0), QPointF(x, row_rect.bottom() - 1.0));
         }
     }
@@ -1873,26 +1932,47 @@ protected:
 
         const QColor line_color = TextLineColor(palette(), 90, 120);
         const QColor text_color = TextLineColor(palette(), 160, 180);
-        const qreal base_y = height() - 6.0;
+        const qreal label_width = qMin<qreal>(LABEL_WIDTH, width());
+        const qreal timeline_width = qMax<qreal>(0.0, width() - label_width);
+        const QRectF frame_rect(0.5, 0.5, qMax(0, width() - 1), qMax(0, height() - 1));
 
         painter.setPen(QPen(line_color));
-        painter.drawLine(QPointF(0.0, base_y), QPointF(width(), base_y));
+        painter.drawRect(frame_rect);
+        painter.drawLine(QPointF(label_width - 0.5, 0.0), QPointF(label_width - 0.5, height()));
 
-        for(qreal x = 0.0; x <= content_width; x += pixels_per_second)
+        QFont label_font = painter.font();
+        label_font.setBold(true);
+        painter.setFont(label_font);
+        painter.setPen(palette().color(QPalette::Text));
+        painter.drawText(QRectF(8.0, 0.0, qMax<qreal>(0.0, label_width - 16.0), height()),
+            Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("Device"));
+
+        painter.save();
+        painter.setClipRect(QRectF(label_width, 0.0, timeline_width, height()));
+        painter.setFont(font());
+
+        const qint64 tick_interval_ms = TimelineTickIntervalMs(pixels_per_second);
+        const qreal tick_width = tick_interval_ms * pixels_per_second / 1000.0;
+        const qint64 first_tick = qMax<qint64>(0, static_cast<qint64>(
+            std::floor(static_cast<qreal>(horizontal_offset) / tick_width)));
+        const qint64 last_tick = qMin(
+            static_cast<qint64>(std::floor(content_width / tick_width)),
+            static_cast<qint64>(std::ceil((horizontal_offset + timeline_width) / tick_width)));
+
+        for(qint64 tick = first_tick; tick <= last_tick; tick++)
         {
-            const qreal view_x = x - horizontal_offset;
-
-            if(view_x < -pixels_per_second || view_x > width() + pixels_per_second)
-            {
-                continue;
-            }
+            const qreal x = tick * tick_width;
+            const qreal view_x = label_width + x - horizontal_offset;
 
             painter.setPen(QPen(line_color));
-            painter.drawLine(QPointF(view_x, 12.0), QPointF(view_x, base_y));
+            painter.drawLine(QPointF(view_x, 0.0), QPointF(view_x, height()));
             painter.setPen(text_color);
-            painter.drawText(QRectF(view_x + 4.0, 0.0, 48.0, height() - 8.0),
-                Qt::AlignVCenter | Qt::AlignLeft, QString::number(static_cast<int>(x / pixels_per_second)) + "s");
+            painter.drawText(QRectF(view_x + 6.0, 0.0, qMax<qreal>(0.0, tick_width - 12.0), height()),
+                Qt::AlignVCenter | Qt::AlignLeft,
+                FormatTimelineTime(tick * tick_interval_ms, tick_interval_ms));
         }
+
+        painter.restore();
     }
 
 private:
@@ -2360,8 +2440,15 @@ public:
         toolbar_right_group->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
         QHBoxLayout* toolbar_right_layout = new QHBoxLayout(toolbar_right_group);
         toolbar_right_layout->setContentsMargins(0, 0, 0, 0);
-        toolbar_right_layout->setSpacing(0);
+        toolbar_right_layout->setSpacing(6);
         toolbar_right_layout->addStretch();
+        QSlider* zoom_slider = new QSlider(Qt::Horizontal, toolbar_right_group);
+        zoom_slider->setRange(static_cast<int>(TIMELINE_ZOOM_MIN), static_cast<int>(TIMELINE_ZOOM_MAX));
+        zoom_slider->setValue(static_cast<int>(GRID_WIDTH));
+        zoom_slider->setFixedWidth(96);
+        zoom_slider->setFocusPolicy(Qt::NoFocus);
+        zoom_slider->setToolTip("Timeline zoom");
+        toolbar_right_layout->addWidget(zoom_slider);
         toolbar_music_button = new QPushButton("Select Music File", toolbar_right_group);
         toolbar_music_button->setObjectName("toolbarMusicButton");
         toolbar_music_button->setFixedHeight(static_cast<int>(TOOLBAR_HEIGHT));
@@ -2407,50 +2494,30 @@ public:
         track_layout->setContentsMargins(0, 0, 0, 0);
         track_layout->setSpacing(0);
 
-        QWidget* left_column = new QWidget(track_area);
-        QVBoxLayout* left_layout = new QVBoxLayout(left_column);
-        left_layout->setContentsMargins(0, 0, 0, 0);
-        left_layout->setSpacing(0);
-        QLabel* left_header = HeaderLabel("Devices / Zones", left_column);
-        left_header->setFixedHeight(static_cast<int>(HEADER_HEIGHT + RULER_HEIGHT));
-        left_layout->addWidget(left_header);
-        left_layout->addWidget(lane_list);
-        left_column->setFixedWidth(static_cast<int>(LABEL_WIDTH));
+        QVBoxLayout* timeline_layout = new QVBoxLayout();
+        timeline_layout->setContentsMargins(0, 0, 0, 0);
+        timeline_layout->setSpacing(0);
+        timeline_layout->addWidget(ruler);
 
-        QWidget* center_column = new QWidget(track_area);
-        QVBoxLayout* center_layout = new QVBoxLayout(center_column);
-        center_layout->setContentsMargins(0, 0, 0, 0);
-        center_layout->setSpacing(0);
-        QWidget* timeline_header = new QWidget(center_column);
-        timeline_header->setFixedHeight(static_cast<int>(HEADER_HEIGHT));
-        QHBoxLayout* timeline_header_layout = new QHBoxLayout(timeline_header);
-        timeline_header_layout->setContentsMargins(0, 0, 0, 0);
-        timeline_header_layout->setSpacing(6);
-        QLabel* timeline_title = HeaderLabel("Timeline", timeline_header);
-        QSlider* zoom_slider = new QSlider(Qt::Horizontal, timeline_header);
-        zoom_slider->setRange(static_cast<int>(TIMELINE_ZOOM_MIN), static_cast<int>(TIMELINE_ZOOM_MAX));
-        zoom_slider->setValue(static_cast<int>(GRID_WIDTH));
-        zoom_slider->setFixedWidth(120);
-        zoom_slider->setToolTip("Timeline zoom");
-        timeline_header_layout->addWidget(timeline_title);
-        timeline_header_layout->addStretch();
-        timeline_header_layout->addWidget(zoom_slider);
-        center_layout->addWidget(timeline_header);
-        center_layout->addWidget(ruler);
-        center_layout->addWidget(view);
+        QWidget* timeline_body = new QWidget(track_area);
+        QHBoxLayout* timeline_body_layout = new QHBoxLayout(timeline_body);
+        timeline_body_layout->setContentsMargins(0, 0, 0, 0);
+        timeline_body_layout->setSpacing(0);
+        lane_list->setFixedWidth(static_cast<int>(LABEL_WIDTH));
+        timeline_body_layout->addWidget(lane_list);
+        timeline_body_layout->addWidget(view, 1);
+        timeline_layout->addWidget(timeline_body, 1);
+        track_layout->addLayout(timeline_layout);
 
         QWidget* right_column = new QWidget(this);
         QVBoxLayout* right_layout = new QVBoxLayout(right_column);
         right_layout->setContentsMargins(0, 0, 0, 0);
         right_layout->setSpacing(0);
         QLabel* effects_header = HeaderLabel("Effects", right_column);
-        effects_header->setFixedHeight(static_cast<int>(HEADER_HEIGHT));
+        effects_header->setFixedHeight(static_cast<int>(RULER_HEIGHT));
         right_layout->addWidget(effects_header);
         right_layout->addWidget(effects_list);
         right_column->setFixedWidth(static_cast<int>(SIDE_PANEL_WIDTH));
-
-        track_layout->addWidget(left_column);
-        track_layout->addWidget(center_column, 1);
 
         content_layout->addWidget(track_area, 1);
         content_layout->addSpacing(static_cast<int>(GAP));
@@ -3121,7 +3188,10 @@ private:
         }
 
         const int icon_group_width = static_cast<int>(TOOLBAR_HEIGHT * 3.0);
-        const int side_width = qMax(icon_group_width, toolbar_music_button->sizeHint().width());
+        const int right_group_width = toolbar_right_group->layout() != nullptr ?
+            toolbar_right_group->layout()->sizeHint().width() :
+            toolbar_music_button->sizeHint().width();
+        const int side_width = qMax(icon_group_width, right_group_width);
         toolbar_left_group->setFixedWidth(side_width);
         toolbar_right_group->setFixedWidth(side_width);
     }
