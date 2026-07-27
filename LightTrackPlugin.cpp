@@ -8,6 +8,7 @@
 #include "ColorUtils.h"
 #include "EffectListManager.h"
 #include "EffectManager.h"
+#include "OpenRGBEffectPage.h"
 #include "OpenRGBEffectSettings.h"
 
 #include <QAbstractItemView>
@@ -51,9 +52,12 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QScrollArea>
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
+#include <QSplitter>
+#include <QStackedWidget>
 #include <QStyleOptionGraphicsItem>
 #include <QTimer>
 #include <QTransform>
@@ -86,7 +90,9 @@ const qreal RULER_HEIGHT = 30.0;
 const qreal LABEL_WIDTH = 238.0;
 const qreal ROW_HEIGHT = 36.0;
 const qreal TIMELINE_MIN_WIDTH = 900.0;
-const qreal SIDE_PANEL_WIDTH = 178.0;
+const qreal EFFECTS_PANEL_WIDTH = 178.0;
+const qreal SETTINGS_PANEL_MIN_WIDTH = 300.0;
+const qreal SETTINGS_PANEL_PREFERRED_WIDTH = 480.0;
 const qreal EFFECT_ROW_HEIGHT = 28.0;
 const qreal CLIP_HEIGHT = 32.0;
 const qreal CLIP_MIN_WIDTH = 72.0;
@@ -1118,6 +1124,16 @@ public:
         music_seek_callback = std::move(callback);
     }
 
+    void SetClipSelectedCallback(std::function<void(TimelineClipItem*)> callback)
+    {
+        clip_selected_callback = std::move(callback);
+    }
+
+    void SetClipRemovedCallback(std::function<void(TimelineClipItem*)> callback)
+    {
+        clip_removed_callback = std::move(callback);
+    }
+
     bool SetPixelsPerSecond(qreal value)
     {
         value = qBound(TIMELINE_ZOOM_MIN, value, TIMELINE_ZOOM_MAX);
@@ -1288,6 +1304,7 @@ protected:
         if(IsPlayheadHandle(event->scenePos()))
         {
             clearSelection();
+            NotifyClipSelected(nullptr);
             drag_mode = PlayheadSeek;
             SeekMusicAt(event->scenePos().x());
             event->accept();
@@ -1298,6 +1315,7 @@ protected:
         if(clip == nullptr)
         {
             clearSelection();
+            NotifyClipSelected(nullptr);
             QGraphicsScene::mousePressEvent(event);
             return;
         }
@@ -1305,6 +1323,7 @@ protected:
         const QPointF local_pos = clip->mapFromScene(event->scenePos());
         clearSelection();
         clip->setSelected(true);
+        NotifyClipSelected(clip);
 
         active_clip = clip;
         if(clip->IsLeftResizeHandle(local_pos))
@@ -1814,6 +1833,9 @@ private:
         clip->setPos(ClampClipX(lane, x, width), ClipY(lane));
         addItem(clip);
         clips.push_back(clip);
+        clearSelection();
+        clip->setSelected(true);
+        NotifyClipSelected(clip);
         RefreshInheritedClips();
     }
 
@@ -1832,10 +1854,25 @@ private:
         }
 
         clips.removeOne(clip);
+
+        if(clip_removed_callback)
+        {
+            clip_removed_callback(clip);
+        }
+
         removeItem(clip);
         delete clip;
+        NotifyClipSelected(nullptr);
 
         RefreshInheritedClips();
+    }
+
+    void NotifyClipSelected(TimelineClipItem* clip)
+    {
+        if(clip_selected_callback)
+        {
+            clip_selected_callback(clip);
+        }
     }
 
     void CancelDrag()
@@ -1861,6 +1898,8 @@ private:
     QString empty_message;
     QVector<qreal> music_spectrum;
     std::function<void(qint64)> music_seek_callback;
+    std::function<void(TimelineClipItem*)> clip_selected_callback;
+    std::function<void(TimelineClipItem*)> clip_removed_callback;
     qint64 music_duration_ms = 0;
     qint64 music_position_ms = 0;
     qreal pixels_per_second = GRID_WIDTH;
@@ -2280,6 +2319,16 @@ public:
         light_scene->SetMusicSeekCallback(std::move(callback));
     }
 
+    void SetClipSelectedCallback(std::function<void(TimelineClipItem*)> callback)
+    {
+        light_scene->SetClipSelectedCallback(std::move(callback));
+    }
+
+    void SetClipRemovedCallback(std::function<void(TimelineClipItem*)> callback)
+    {
+        light_scene->SetClipRemovedCallback(std::move(callback));
+    }
+
     void SetHorizontalZoom(int pixels_per_second)
     {
         const QPoint anchor = viewport()->rect().center();
@@ -2477,6 +2526,7 @@ public:
         ruler = new TimelineRulerWidget(this);
         view = new LightTrackView(this);
         effects_list = new EffectsListWidget(this);
+        settings_stack = new QStackedWidget(this);
         music_timer = new QTimer(this);
         music_timer->setInterval(33);
         view->SetRuler(ruler);
@@ -2487,6 +2537,21 @@ public:
         lane_list->SetVisibilityChangedCallback([this](const QVector<int>& lane_indices)
         {
             view->SetVisibleLanes(lane_indices);
+        });
+
+        settings_placeholder = new QLabel("Select an effect card on the timeline to configure it.", settings_stack);
+        settings_placeholder->setAlignment(Qt::AlignCenter);
+        settings_placeholder->setWordWrap(true);
+        settings_placeholder->setMargin(24);
+        settings_stack->addWidget(settings_placeholder);
+
+        view->SetClipSelectedCallback([this](TimelineClipItem* clip)
+        {
+            ShowClipSettings(clip);
+        });
+        view->SetClipRemovedCallback([this](TimelineClipItem* clip)
+        {
+            RemoveClipSettings(clip);
         });
 
         QWidget* track_area = new QWidget(content);
@@ -2509,19 +2574,42 @@ public:
         timeline_layout->addWidget(timeline_body, 1);
         track_layout->addLayout(timeline_layout);
 
+        QWidget* left_column = new QWidget(this);
+        QVBoxLayout* left_layout = new QVBoxLayout(left_column);
+        left_layout->setContentsMargins(0, 0, 0, 0);
+        left_layout->setSpacing(0);
+        QLabel* effects_header = HeaderLabel("Effects", left_column);
+        effects_header->setFixedHeight(static_cast<int>(RULER_HEIGHT));
+        left_layout->addWidget(effects_header);
+        left_layout->addWidget(effects_list);
+        left_column->setFixedWidth(static_cast<int>(EFFECTS_PANEL_WIDTH));
+
         QWidget* right_column = new QWidget(this);
         QVBoxLayout* right_layout = new QVBoxLayout(right_column);
         right_layout->setContentsMargins(0, 0, 0, 0);
         right_layout->setSpacing(0);
-        QLabel* effects_header = HeaderLabel("Effects", right_column);
-        effects_header->setFixedHeight(static_cast<int>(RULER_HEIGHT));
-        right_layout->addWidget(effects_header);
-        right_layout->addWidget(effects_list);
-        right_column->setFixedWidth(static_cast<int>(SIDE_PANEL_WIDTH));
+        QLabel* settings_header = HeaderLabel("Effect Settings", right_column);
+        settings_header->setFixedHeight(static_cast<int>(RULER_HEIGHT));
+        right_layout->addWidget(settings_header);
+        right_layout->addWidget(settings_stack);
+        right_column->setMinimumWidth(static_cast<int>(SETTINGS_PANEL_MIN_WIDTH));
+        right_column->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 
-        content_layout->addWidget(track_area, 1);
+        QSplitter* content_splitter = new QSplitter(Qt::Horizontal, content);
+        content_splitter->setChildrenCollapsible(false);
+        content_splitter->setHandleWidth(static_cast<int>(GAP));
+        content_splitter->addWidget(track_area);
+        content_splitter->addWidget(right_column);
+        content_splitter->setStretchFactor(0, 1);
+        content_splitter->setStretchFactor(1, 0);
+        content_splitter->setSizes({
+            static_cast<int>(TIMELINE_MIN_WIDTH + LABEL_WIDTH),
+            static_cast<int>(SETTINGS_PANEL_PREFERRED_WIDTH)
+        });
+
+        content_layout->addWidget(left_column);
         content_layout->addSpacing(static_cast<int>(GAP));
-        content_layout->addWidget(right_column);
+        content_layout->addWidget(content_splitter, 1);
 
         page_layout->addWidget(toolbar);
         page_layout->addWidget(toolbar_separator);
@@ -2727,7 +2815,6 @@ private:
             return nullptr;
         }
 
-        effect->hide();
         effect->SetFPS(OpenRGBEffectSettings::globalSettings.fps);
         effect->SetBrightness(OpenRGBEffectSettings::globalSettings.brightness);
         effect->SetTemperature(OpenRGBEffectSettings::globalSettings.temperature);
@@ -2751,24 +2838,104 @@ private:
         return effect;
     }
 
-    RGBEffect* EnsureRuntimeEffect(const TimelineClipState& clip)
+    RGBEffect* EnsureClipEffect(const TimelineClipItem* clip)
     {
-        auto found = runtime_effects.find(clip.clip);
-        if(found != runtime_effects.end())
+        if(clip == nullptr)
+        {
+            return nullptr;
+        }
+
+        auto found = clip_effects.find(clip);
+        if(found != clip_effects.end())
         {
             return found->second;
         }
 
-        RGBEffect* effect = CreateRuntimeEffect(clip.effect);
-        if(effect != nullptr)
+        RGBEffect* effect = CreateRuntimeEffect(clip->Effect());
+        if(effect == nullptr)
         {
-            runtime_effects[clip.clip] = effect;
+            return nullptr;
         }
 
+        OpenRGBEffectPage* page = new OpenRGBEffectPage(nullptr, effect);
+        page->SetPreviewButtonVisible(false);
+        page->setMinimumWidth(0);
+        page->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+        effect->show();
+
+        QScrollArea* scroll_area = new QScrollArea(settings_stack);
+        scroll_area->setWidgetResizable(true);
+        scroll_area->setFrameShape(QFrame::NoFrame);
+        scroll_area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll_area->setWidget(page);
+        settings_stack->addWidget(scroll_area);
+
+        clip_effects[clip] = effect;
+        clip_settings[clip] = scroll_area;
         return effect;
     }
 
-    void DestroyRuntimeEffect(RGBEffect* effect) const
+    void ShowClipSettings(TimelineClipItem* clip)
+    {
+        if(clip == nullptr)
+        {
+            settings_stack->setCurrentWidget(settings_placeholder);
+            return;
+        }
+
+        if(EnsureClipEffect(clip) == nullptr)
+        {
+            settings_placeholder->setText("This effect could not be configured.");
+            settings_stack->setCurrentWidget(settings_placeholder);
+            return;
+        }
+
+        settings_placeholder->setText("Select an effect card on the timeline to configure it.");
+        auto found = clip_settings.find(clip);
+        if(found != clip_settings.end())
+        {
+            settings_stack->setCurrentWidget(found->second);
+        }
+    }
+
+    void RemoveClipSettings(TimelineClipItem* clip)
+    {
+        if(clip == nullptr)
+        {
+            return;
+        }
+
+        auto effect_it = clip_effects.find(clip);
+        if(effect_it != clip_effects.end())
+        {
+            DeactivateRuntimeEffect(effect_it->second);
+        }
+
+        runtime_assignments.erase(clip);
+
+        auto settings_it = clip_settings.find(clip);
+        if(settings_it != clip_settings.end())
+        {
+            QWidget* settings_widget = settings_it->second;
+            if(settings_stack->currentWidget() == settings_widget)
+            {
+                settings_stack->setCurrentWidget(settings_placeholder);
+            }
+
+            settings_stack->removeWidget(settings_widget);
+            delete settings_widget;
+            clip_settings.erase(settings_it);
+        }
+
+        clip_effects.erase(clip);
+    }
+
+    RGBEffect* EnsureRuntimeEffect(const TimelineClipState& clip)
+    {
+        return EnsureClipEffect(clip.clip);
+    }
+
+    void DeactivateRuntimeEffect(RGBEffect* effect) const
     {
         if(effect == nullptr)
         {
@@ -2782,7 +2949,6 @@ private:
         }
 
         manager->RemoveMapping(effect);
-        delete effect;
     }
 
     void StartRuntime(qint64 position_ms)
@@ -2800,14 +2966,13 @@ private:
 
     void StopRuntime()
     {
-        const bool was_running = runtime_running || !runtime_effects.empty();
+        const bool was_running = runtime_running || !runtime_assignments.empty();
 
-        for(auto& runtime_effect : runtime_effects)
+        for(auto& clip_effect : clip_effects)
         {
-            DestroyRuntimeEffect(runtime_effect.second);
+            DeactivateRuntimeEffect(clip_effect.second);
         }
 
-        runtime_effects.clear();
         runtime_assignments.clear();
         runtime_running = false;
 
@@ -2860,17 +3025,20 @@ private:
             }
         }
 
-        for(auto effect_it = runtime_effects.begin(); effect_it != runtime_effects.end();)
+        for(auto assignment_it = runtime_assignments.begin(); assignment_it != runtime_assignments.end();)
         {
-            if(assignments.find(effect_it->first) == assignments.end())
+            if(assignments.find(assignment_it->first) == assignments.end())
             {
-                DestroyRuntimeEffect(effect_it->second);
-                runtime_assignments.erase(effect_it->first);
-                effect_it = runtime_effects.erase(effect_it);
+                auto effect_it = clip_effects.find(assignment_it->first);
+                if(effect_it != clip_effects.end())
+                {
+                    DeactivateRuntimeEffect(effect_it->second);
+                }
+                assignment_it = runtime_assignments.erase(assignment_it);
             }
             else
             {
-                ++effect_it;
+                ++assignment_it;
             }
         }
 
@@ -3211,6 +3379,8 @@ private:
     TimelineRulerWidget* ruler;
     LightTrackView* view;
     EffectsListWidget* effects_list;
+    QStackedWidget* settings_stack;
+    QLabel* settings_placeholder;
     QWidget* toolbar_left_group = nullptr;
     QWidget* toolbar_right_group = nullptr;
     QPushButton* toolbar_music_button = nullptr;
@@ -3228,7 +3398,8 @@ private:
     QVector<LaneEntry> current_lanes;
     std::vector<std::unique_ptr<ControllerZone>> runtime_zones;
     QVector<RuntimeTarget> runtime_targets;
-    std::map<const TimelineClipItem*, RGBEffect*> runtime_effects;
+    std::map<const TimelineClipItem*, RGBEffect*> clip_effects;
+    std::map<const TimelineClipItem*, QWidget*> clip_settings;
     std::map<const TimelineClipItem*, std::vector<ControllerZone*>> runtime_assignments;
     bool runtime_running = false;
 };
