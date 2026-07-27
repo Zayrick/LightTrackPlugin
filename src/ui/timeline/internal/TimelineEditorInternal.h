@@ -55,6 +55,7 @@ inline constexpr qreal CLIP_DEFAULT_WIDTH = 130.0;
 inline constexpr qreal TIMELINE_TICK_TARGET_WIDTH = 90.0;
 inline constexpr qreal RESIZE_HANDLE_WIDTH = 9.0;
 inline constexpr qreal PLAYHEAD_HANDLE_RADIUS = 6.0;
+inline constexpr qreal SNAP_DISTANCE = 8.0;
 
 using lighttrack::timeline_metrics::EFFECTS_PANEL_WIDTH;
 using lighttrack::timeline_metrics::GAP;
@@ -239,6 +240,7 @@ public:
         qint64 start_ms,
         qint64 end_ms,
         ClipId requested_id);
+    void SetSnappingEnabled(bool enabled);
     bool SetPixelsPerSecond(qreal value);
     qreal PixelsPerSecond() const;
     qreal ContentWidth() const;
@@ -298,6 +300,16 @@ private:
     int LaneAt(const QPointF& pos) const;
     qreal ClipY(int lane) const;
     qreal ClampClipX(int lane, qreal x, qreal width) const;
+    qreal SnapClipX(
+        qreal x,
+        qreal width,
+        const TimelineClipItem* ignored_clip) const;
+    qreal SnapEdgeX(
+        qreal x,
+        const TimelineClipItem* ignored_clip) const;
+    qreal SnapDelta(
+        const QVector<qreal>& moving_edges,
+        const TimelineClipItem* ignored_clip) const;
     qreal MusicPixelWidth() const;
     void AddMusicItems();
     void UpdatePlayhead();
@@ -342,6 +354,7 @@ private:
     qint64 music_position_ms = 0;
     qint64 minimum_content_duration_ms = 0;
     qreal pixels_per_second = GRID_WIDTH;
+    bool snapping_enabled = true;
     quint64 next_clip_id = 0;
     DragMode drag_mode = NoDrag;
     QPointF drag_offset;
@@ -448,6 +461,7 @@ public:
     void SetTimelineChangedCallback(
         TimelineEditor::TimelineChangedCallback callback);
     void SetHorizontalZoom(int pixels_per_second);
+    void SetSnappingEnabled(bool enabled);
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;

@@ -136,6 +136,11 @@ void TimelineEditor::SetHorizontalZoom(int pixels_per_second)
     d->view->SetHorizontalZoom(pixels_per_second);
 }
 
+void TimelineEditor::SetSnappingEnabled(bool enabled)
+{
+    d->view->SetSnappingEnabled(enabled);
+}
+
 QVector<TimelineClip> TimelineEditor::TimelineClips() const
 {
     return d->view->TimelineClips();

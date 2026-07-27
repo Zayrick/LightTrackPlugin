@@ -109,6 +109,15 @@ LightTrackPage::LightTrackPage(
             background-color: rgba(127, 127, 127, 80);
         }
 
+        QWidget#lightTrackToolbar QPushButton#toolbarSnapButton:checked {
+            background-color: rgba(64, 188, 255, 70);
+            border-color: rgba(64, 188, 255, 180);
+        }
+
+        QWidget#lightTrackToolbar QPushButton#toolbarSnapButton:checked:hover {
+            background-color: rgba(64, 188, 255, 95);
+        }
+
         QWidget#lightTrackToolbar QPushButton#toolbarMusicButton {
             padding: 0 10px;
         }
@@ -179,6 +188,15 @@ LightTrackPage::LightTrackPage(
         static_cast<int>(TOOLBAR_HEIGHT));
     toolbar_music_button->setFocusPolicy(Qt::NoFocus);
     toolbar_right_layout->addWidget(toolbar_music_button);
+    toolbar_snap_button =
+        ToolbarButton(0xE2B5, toolbar_right_group);
+    toolbar_snap_button->setObjectName("toolbarSnapButton");
+    toolbar_snap_button->setCheckable(true);
+    toolbar_snap_button->setChecked(true);
+    toolbar_snap_button->setToolTip(
+        "Snap clips to the timeline grid and other clip edges");
+    toolbar_snap_button->setAccessibleName("Timeline snapping");
+    toolbar_right_layout->addWidget(toolbar_snap_button);
     UpdateToolbarSideWidths();
 
     toolbar_layout->addWidget(toolbar_left_group);
@@ -314,6 +332,14 @@ LightTrackPage::LightTrackPage(
         &QPushButton::clicked,
         this,
         [this]() { ToggleMusicPlayback(); });
+    connect(
+        toolbar_snap_button,
+        &QPushButton::toggled,
+        this,
+        [this](bool enabled)
+        {
+            timeline_editor->SetSnappingEnabled(enabled);
+        });
     connect(
         zoom_slider,
         &QSlider::valueChanged,

@@ -34,6 +34,7 @@ public:
     void SetMusicPosition(qint64 position_ms);
     void SetMinimumTimelineDuration(qint64 duration_ms);
     void SetHorizontalZoom(int pixels_per_second);
+    void SetSnappingEnabled(bool enabled);
 
     QVector<TimelineClip> TimelineClips() const;
     QVector<TimelineClip> PersistentTimelineClips() const;

@@ -184,6 +184,11 @@ ClipId LightTrackScene::RestoreClip(
     return clip == nullptr ? ClipId{} : clip->Id();
 }
 
+void LightTrackScene::SetSnappingEnabled(bool enabled)
+{
+    snapping_enabled = enabled;
+}
+
 bool LightTrackScene::SetPixelsPerSecond(qreal value)
 {
     value = qBound(
@@ -246,7 +251,13 @@ bool LightTrackScene::PreviewEffectAt(const QString& effect_id, const QPointF& p
 
     const qreal clip_width = DefaultClipWidth();
     const qreal x =
-        ClampClipX(lane, pos.x() - clip_width / 2.0, clip_width);
+        ClampClipX(
+            lane,
+            SnapClipX(
+                pos.x() - clip_width / 2.0,
+                clip_width,
+                nullptr),
+            clip_width);
     ShowPreview(lane, x, clip_width, *effect);
     return true;
 }
@@ -266,10 +277,14 @@ bool LightTrackScene::AddEffectAt(const QString& effect_id, const QPointF& pos)
     }
 
     const qreal clip_width = DefaultClipWidth();
+    const qreal x = SnapClipX(
+        pos.x() - clip_width / 2.0,
+        clip_width,
+        nullptr);
     return AddClip(
                *effect,
                lane,
-               pos.x() - clip_width / 2.0,
+               x,
                clip_width,
                true,
                true,
@@ -893,6 +908,91 @@ qreal LightTrackScene::ClampClipX(int lane, qreal x, qreal width) const
     return qBound(rect.left(), x, rect.right() - width);
 }
 
+qreal LightTrackScene::SnapClipX(
+    qreal x,
+    qreal width,
+    const TimelineClipItem* ignored_clip) const
+{
+    return x + SnapDelta(
+        {x, x + width},
+        ignored_clip);
+}
+
+qreal LightTrackScene::SnapEdgeX(
+    qreal x,
+    const TimelineClipItem* ignored_clip) const
+{
+    return x + SnapDelta({x}, ignored_clip);
+}
+
+qreal LightTrackScene::SnapDelta(
+    const QVector<qreal>& moving_edges,
+    const TimelineClipItem* ignored_clip) const
+{
+    if(!snapping_enabled || moving_edges.empty())
+    {
+        return 0.0;
+    }
+
+    qreal best_delta = 0.0;
+    qreal best_distance = SNAP_DISTANCE + 1.0;
+    const auto consider_target =
+        [&best_delta, &best_distance](
+            qreal moving_edge,
+            qreal target)
+        {
+            const qreal delta = target - moving_edge;
+            const qreal distance = qAbs(delta);
+            if(distance <= SNAP_DISTANCE
+                && distance < best_distance)
+            {
+                best_delta = delta;
+                best_distance = distance;
+            }
+        };
+
+    for(const TimelineClipItem* clip : clips)
+    {
+        if(clip == ignored_clip || !clip->isVisible())
+        {
+            continue;
+        }
+
+        const qreal clip_left = clip->pos().x();
+        const qreal clip_right = clip_left + clip->ClipWidth();
+        for(qreal moving_edge : moving_edges)
+        {
+            consider_target(moving_edge, clip_left);
+            consider_target(moving_edge, clip_right);
+        }
+    }
+
+    if(best_distance <= SNAP_DISTANCE)
+    {
+        return best_delta;
+    }
+
+    const qint64 interval_ms =
+        TimelineTickIntervalMs(pixels_per_second);
+    const qreal interval_width =
+        interval_ms * pixels_per_second / 1000.0;
+    if(interval_width <= 0.0)
+    {
+        return 0.0;
+    }
+
+    for(qreal moving_edge : moving_edges)
+    {
+        const qreal target =
+            qRound64(moving_edge / interval_width)
+            * interval_width;
+        consider_target(moving_edge, target);
+    }
+    return best_distance <= SNAP_DISTANCE
+        ? best_delta
+        : 0.0;
+}
+
 qreal LightTrackScene::MusicPixelWidth() const
 {
     if(music_duration_ms <= 0)
@@ -1010,7 +1110,10 @@ void LightTrackScene::UpdateClipMove(const QPointF& pos)
     const qreal width = active_clip->ClipWidth();
     const qreal x = ClampClipX(
         target_lane,
-        pos.x() - drag_offset.x(),
+        SnapClipX(
+            pos.x() - drag_offset.x(),
+            width,
+            active_clip),
         width);
     active_clip->SetLaneIndex(target_lane);
     active_clip->setPos(x, ClipY(target_lane));
@@ -1035,20 +1138,32 @@ void LightTrackScene::UpdateClipResize(const QPointF& pos)
     if(drag_mode == ClipResizeLeft)
     {
         const qreal right = clip_start_x + clip_start_width;
-        x = qBound(
+        const qreal unsnapped_x = qBound(
             lanes[lane].rect.left(),
             clip_start_x + pos.x() - drag_scene_start.x(),
+            right - CLIP_MIN_WIDTH);
+        x = qBound(
+            lanes[lane].rect.left(),
+            SnapEdgeX(unsnapped_x, active_clip),
             right - CLIP_MIN_WIDTH);
         width = right - x;
     }
     else
     {
-        const qreal max_width =
-            lanes[lane].rect.right() - clip_start_x;
-        width = qBound(
-            CLIP_MIN_WIDTH,
-            clip_start_width + pos.x() - drag_scene_start.x(),
-            max_width);
+        const qreal minimum_right =
+            clip_start_x + CLIP_MIN_WIDTH;
+        const qreal unsnapped_right = qBound(
+            minimum_right,
+            clip_start_x
+                + clip_start_width
+                + pos.x()
+                - drag_scene_start.x(),
+            lanes[lane].rect.right());
+        const qreal right = qBound(
+            minimum_right,
+            SnapEdgeX(unsnapped_right, active_clip),
+            lanes[lane].rect.right());
+        width = right - clip_start_x;
     }
 
     active_clip->SetClipWidth(width);

@@ -130,6 +130,7 @@ private:
     QPushButton* toolbar_load_button = nullptr;
     QPushButton* toolbar_music_button = nullptr;
     QPushButton* toolbar_play_button = nullptr;
+    QPushButton* toolbar_snap_button = nullptr;
     QTimer* music_timer = nullptr;
     QTimer* history_commit_timer = nullptr;
     QString music_path;

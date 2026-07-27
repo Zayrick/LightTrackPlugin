@@ -149,6 +149,11 @@ void LightTrackView::SetTimelineChangedCallback(
     light_scene->SetTimelineChangedCallback(std::move(callback));
 }
 
+void LightTrackView::SetSnappingEnabled(bool enabled)
+{
+    light_scene->SetSnappingEnabled(enabled);
+}
+
 void LightTrackView::SetHorizontalZoom(int pixels_per_second)
 {
     const QPoint anchor = viewport()->rect().center();
