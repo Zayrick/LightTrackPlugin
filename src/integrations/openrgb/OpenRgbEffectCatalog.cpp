@@ -1,4 +1,4 @@
-#include "LightTrackEffectCatalog.h"
+#include "integrations/openrgb/OpenRgbEffectCatalog.h"
 
 #include "EffectListManager.h"
 
@@ -13,14 +13,16 @@ QColor ColorForEffect(const QString& id)
 }
 }
 
-QVector<LightTrackEffectGroup> LoadOpenRGBEffectsCatalog()
+namespace lighttrack::openrgb
 {
-    QVector<LightTrackEffectGroup> groups;
+QVector<EffectGroup> LoadEffectCatalog()
+{
+    QVector<EffectGroup> groups;
     const auto categories = EffectListManager::get()->GetCategorizedEffects();
 
     for(const auto& category : categories)
     {
-        LightTrackEffectGroup group{QString::fromStdString(category.first), {}};
+        EffectGroup group{QString::fromStdString(category.first), {}};
 
         for(const effect_names& effect : category.second)
         {
@@ -28,7 +30,7 @@ QVector<LightTrackEffectGroup> LoadOpenRGBEffectsCatalog()
             group.effects.push_back({id, QString::fromStdString(effect.ui_name), group.name, ColorForEffect(id)});
         }
 
-        std::sort(group.effects.begin(), group.effects.end(), [](const LightTrackEffectInfo& a, const LightTrackEffectInfo& b)
+        std::sort(group.effects.begin(), group.effects.end(), [](const EffectDescriptor& a, const EffectDescriptor& b)
         {
             return a.name < b.name;
         });
@@ -36,7 +38,7 @@ QVector<LightTrackEffectGroup> LoadOpenRGBEffectsCatalog()
         groups.push_back(group);
     }
 
-    std::sort(groups.begin(), groups.end(), [](const LightTrackEffectGroup& a, const LightTrackEffectGroup& b)
+    std::sort(groups.begin(), groups.end(), [](const EffectGroup& a, const EffectGroup& b)
     {
         return a.name < b.name;
     });
@@ -44,11 +46,11 @@ QVector<LightTrackEffectGroup> LoadOpenRGBEffectsCatalog()
     return groups;
 }
 
-bool FindOpenRGBEffect(const QString& id, LightTrackEffectInfo* effect)
+bool FindEffect(const QString& id, EffectDescriptor* effect)
 {
-    for(const LightTrackEffectGroup& group : LoadOpenRGBEffectsCatalog())
+    for(const EffectGroup& group : LoadEffectCatalog())
     {
-        for(const LightTrackEffectInfo& candidate : group.effects)
+        for(const EffectDescriptor& candidate : group.effects)
         {
             if(candidate.id == id)
             {
@@ -62,4 +64,5 @@ bool FindOpenRGBEffect(const QString& id, LightTrackEffectInfo* effect)
     }
 
     return false;
+}
 }

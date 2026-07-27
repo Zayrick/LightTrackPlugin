@@ -1,6 +1,8 @@
 #pragma once
 
+// Thin OpenRGB host adapter. UI and runtime implementations live in separate modules.
 #include <QObject>
+#include <QPointer>
 #include "OpenRGBPluginInterface.h"
 
 class ResourceManagerInterface;
@@ -12,6 +14,8 @@ class LightTrackPlugin : public QObject, public OpenRGBPluginInterface
     Q_INTERFACES(OpenRGBPluginInterface)
 
 public:
+    ~LightTrackPlugin() override;
+
     OpenRGBPluginInfo GetPluginInfo() override;
     unsigned int GetPluginAPIVersion() override;
     void Load(ResourceManagerInterface* resource_manager_ptr) override;
@@ -23,5 +27,6 @@ private:
     static void DeviceListChangedCallback(void* ptr);
 
     ResourceManagerInterface* resource_manager = nullptr;
-    QWidget* page = nullptr;
+    QPointer<QWidget> page;
+    bool callbacks_registered = false;
 };

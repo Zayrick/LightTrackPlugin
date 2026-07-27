@@ -31,7 +31,6 @@ ui_*.h
 qrc_*.cpp
 Thumbs.db
 *.res
-*.rc
 /.qmake.cache
 /.qmake.stash
 **/.qmlls.ini
@@ -80,7 +79,8 @@ CMakeLists.txt.user*
 .pch/
 .rcc/
 .uic/
-/build*/
+/build/
 /.qtcreator/
 
 .vscode/
+CMakeUserPresets.json

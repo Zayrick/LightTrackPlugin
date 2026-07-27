@@ -4,146 +4,179 @@ project(LightTrackPlugin LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
-set(CMAKE_AUTOUIC ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets OpenGL)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets OpenGL)
-if(QT_VERSION_MAJOR EQUAL 6)
-  find_package(Qt6 REQUIRED COMPONENTS Core5Compat OpenGLWidgets)
+set(LIGHTTRACK_MINIMUM_QT5_VERSION 5.10)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Gui Widgets OpenGL)
+if(QT_VERSION_MAJOR EQUAL 5)
+  find_package(
+    Qt5 ${LIGHTTRACK_MINIMUM_QT5_VERSION}
+    REQUIRED COMPONENTS Core Gui Widgets OpenGL
+  )
+elseif(QT_VERSION_MAJOR EQUAL 6)
+  find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL)
+else()
+  message(FATAL_ERROR "LightTrackPlugin requires Qt 5 or Qt 6")
 endif()
 
 set(OPENRGB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/OpenRGB)
 set(OPENRGB_EFFECTS_PLUGIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/OpenRGBEffectsPlugin)
 set(MINIAUDIO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/miniaudio)
-file(GLOB_RECURSE OPENRGB_EFFECT_SOURCES CONFIGURE_DEPENDS
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/*.cpp
-)
-file(GLOB_RECURSE OPENRGB_EFFECT_FORMS CONFIGURE_DEPENDS
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/*.ui
-)
-file(GLOB OPENRGB_QCODEEDITOR_SOURCES CONFIGURE_DEPENDS
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/src/internal/*.cpp
-)
-file(GLOB OPENRGB_QCODEEDITOR_HEADERS CONFIGURE_DEPENDS
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/include/internal/*.hpp
-)
-set(OPENRGB_EFFECT_MANUAL_MOC_HEADERS
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/Policing/Policing.h
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/Visor/Visor.h
-)
-set_source_files_properties(
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/Policing/Policing.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/Visor/Visor.cpp
-  ${OPENRGB_EFFECT_MANUAL_MOC_HEADERS}
-  PROPERTIES SKIP_AUTOMOC ON
-)
-if(QT_VERSION_MAJOR EQUAL 6)
-  qt6_wrap_cpp(OPENRGB_EFFECT_MANUAL_MOC ${OPENRGB_EFFECT_MANUAL_MOC_HEADERS})
-  qt6_wrap_ui(OPENRGB_EFFECT_MANUAL_UI ${OPENRGB_EFFECTS_PLUGIN_DIR}/OpenRGBEffectTab.ui)
-else()
-  qt5_wrap_cpp(OPENRGB_EFFECT_MANUAL_MOC ${OPENRGB_EFFECT_MANUAL_MOC_HEADERS})
-  qt5_wrap_ui(OPENRGB_EFFECT_MANUAL_UI ${OPENRGB_EFFECTS_PLUGIN_DIR}/OpenRGBEffectTab.ui)
-endif()
-set(OPENRGB_EFFECT_SUPPORT_FORMS
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Audio/AudioSettings.ui
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorPicker.ui
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorsPicker.ui
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectList.ui
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectSearch.ui
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/LivePreviewController.ui
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/OpenRGBEffectTab.ui
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/OpenRGBEffectPage.ui
-)
-set(OPENRGB_AUTOUIC_SEARCH_PATHS ${OPENRGB_EFFECT_SUPPORT_FORMS} ${OPENRGB_EFFECT_FORMS})
-foreach(form ${OPENRGB_AUTOUIC_SEARCH_PATHS})
-  get_filename_component(form_dir ${form} DIRECTORY)
-  list(APPEND OPENRGB_EFFECT_UI_DIRS ${form_dir})
-endforeach()
-list(REMOVE_DUPLICATES OPENRGB_EFFECT_UI_DIRS)
 
-add_library(LightTrackPlugin SHARED
-  LightTrackPlugin_global.h
-  LightTrackPlugin.cpp
-  LightTrackPlugin.h
-  LightTrackPlugin.qrc
-  ${MINIAUDIO_DIR}/miniaudio.c
-  LightTrackEffectCatalog.h
-  LightTrackEffectCatalog.cpp
-  LightTrackOpenRGBEffectsBridge.h
-  LightTrackOpenRGBEffectsBridge.cpp
-  ${OPENRGB_DIR}/RGBController/RGBController.cpp
-  ${OPENRGB_DIR}/qt/hsv.cpp
-  ${OPENRGB_DIR}/qt/QTooltipedSlider.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectListManager.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectList.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectManager.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectSearch.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/LivePreviewController.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/OpenRGBEffectSettings.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/OpenRGBEffectPage.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/OpenRGBPluginsFont.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/PreviewWidget.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Audio/AudioManager.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Audio/AudioSettings.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Audio/AudioSettingsStruct.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Audio/AudioSignalProcessor.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorPicker.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorsPicker.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/qt/QtScreenCapturer.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/windows/WindowsScreenCapturer.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/ScreenCapturer.h
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/RGBEffect.h
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/chuck_fft/chuck_fft.c
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/ctkrangeslider/ctkrangeslider.cpp
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/SimplexNoise/src/SimplexNoise.cpp
-  ${OPENRGB_QCODEEDITOR_SOURCES}
-  ${OPENRGB_QCODEEDITOR_HEADERS}
-  ${OPENRGB_EFFECT_MANUAL_MOC}
-  ${OPENRGB_EFFECT_MANUAL_UI}
-  ${OPENRGB_EFFECT_SOURCES}
-  ${OPENRGB_EFFECT_FORMS}
-  ${OPENRGB_EFFECT_SUPPORT_FORMS}
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/resources.qrc
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/resources/qcodeeditor_resources.qrc
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenRGBEffects.cmake)
+
+# Stable value types and header-only rules shared by every project layer.
+add_library(lighttrack_core INTERFACE)
+add_library(lighttrack::core ALIAS lighttrack_core)
+target_include_directories(lighttrack_core INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+)
+target_link_libraries(lighttrack_core INTERFACE
+  "Qt${QT_VERSION_MAJOR}::Core"
+  "Qt${QT_VERSION_MAJOR}::Gui"
 )
 
-target_compile_definitions(LightTrackPlugin PRIVATE LIGHTTRACKPLUGIN_LIBRARY)
-target_compile_definitions(LightTrackPlugin PRIVATE MA_NO_ENCODING)
-target_compile_definitions(LightTrackPlugin PRIVATE SHADERS_README="https://gitlab.com/OpenRGBDevelopers/OpenRGBEffectsPlugin/-/blob/master/Effects/Shaders/README.md")
-set_target_properties(LightTrackPlugin PROPERTIES AUTOUIC_SEARCH_PATHS "${OPENRGB_EFFECT_UI_DIRS}")
-target_include_directories(LightTrackPlugin PRIVATE
-  ${OPENRGB_DIR}
-  ${OPENRGB_DIR}/RGBController
-  ${OPENRGB_DIR}/dependencies/json
-  ${OPENRGB_DIR}/i2c_smbus
-  ${OPENRGB_DIR}/net_port
-  ${OPENRGB_DIR}/qt
-  ${CMAKE_CURRENT_BINARY_DIR}
-  ${MINIAUDIO_DIR}
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Audio
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/qt
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/windows
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/chuck_fft
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/ctkrangeslider
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/SimplexNoise/src
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/include
-  ${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/QCodeEditor/include/internal
+# Project-owned ports. Implementations live in infrastructure/integrations.
+add_library(lighttrack_application INTERFACE)
+add_library(lighttrack::application ALIAS lighttrack_application)
+target_link_libraries(lighttrack_application INTERFACE
+  lighttrack_core
 )
-target_link_libraries(LightTrackPlugin PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::OpenGL)
-if(QT_VERSION_MAJOR EQUAL 6)
-  target_link_libraries(LightTrackPlugin PRIVATE Qt6::Core5Compat Qt6::OpenGLWidgets)
-endif()
 
+add_library(lighttrack_timeline STATIC
+  src/ui/UiHelpers.h
+  src/ui/timeline/TimelineEditor.h
+  src/ui/timeline/TimelineEditor.cpp
+  src/ui/timeline/TimelineMetrics.h
+  src/ui/timeline/internal/TimelineEditorInternal.h
+  src/ui/timeline/internal/TimelineEditorCommon.cpp
+  src/ui/timeline/internal/TimelineEditorGraphicsItems.cpp
+  src/ui/timeline/internal/TimelineEditorScene.cpp
+  src/ui/timeline/internal/TimelineEditorPanels.cpp
+  src/ui/timeline/internal/TimelineEditorView.cpp
+)
+add_library(lighttrack::timeline ALIAS lighttrack_timeline)
+target_link_libraries(lighttrack_timeline PUBLIC
+  lighttrack_core
+  "Qt${QT_VERSION_MAJOR}::Widgets"
+)
+set_target_properties(lighttrack_timeline PROPERTIES
+  AUTOMOC ON
+  POSITION_INDEPENDENT_CODE ON
+)
+
+add_library(lighttrack_page STATIC
+  src/ui/pages/LightTrackPage.h
+  src/ui/pages/LightTrackPagePrivate.h
+  src/ui/pages/LightTrackPage.cpp
+  src/ui/pages/LightTrackPageLayout.cpp
+  src/ui/pages/LightTrackPagePlayback.cpp
+  src/ui/pages/LightTrackPageSettings.cpp
+)
+add_library(lighttrack::page ALIAS lighttrack_page)
+target_link_libraries(lighttrack_page
+  PUBLIC
+    lighttrack_application
+    "Qt${QT_VERSION_MAJOR}::Widgets"
+  PRIVATE
+    lighttrack_timeline
+)
+set_target_properties(lighttrack_page PROPERTIES
+  AUTOMOC ON
+  POSITION_INDEPENDENT_CODE ON
+)
+
+# miniaudio.c is compiled exactly once here. No miniaudio type escapes this target.
+add_library(lighttrack_audio STATIC
+  src/integrations/audio/AudioWaveformAnalyzer.h
+  src/integrations/audio/AudioWaveformAnalyzer.cpp
+  src/integrations/audio/MiniaudioAudioService.h
+  src/integrations/audio/MiniaudioAudioService.cpp
+  "${MINIAUDIO_DIR}/miniaudio.c"
+)
+add_library(lighttrack::audio ALIAS lighttrack_audio)
+target_include_directories(lighttrack_audio PRIVATE
+  "${MINIAUDIO_DIR}"
+)
+target_compile_definitions(lighttrack_audio PRIVATE
+  MA_NO_ENCODING
+)
+target_link_libraries(lighttrack_audio
+  PUBLIC
+    lighttrack_application
+  PRIVATE
+    "Qt${QT_VERSION_MAJOR}::Core"
+)
+set_target_properties(lighttrack_audio PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
 if(WIN32)
-  target_compile_definitions(LightTrackPlugin PRIVATE _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS WIN32_LEAN_AND_MEAN)
-  target_link_libraries(LightTrackPlugin PRIVATE winmm ole32 user32 gdi32 opengl32)
+  target_link_libraries(lighttrack_audio PRIVATE
+    winmm
+    ole32
+  )
 endif()
 
-if(MSVC)
-  target_compile_options(LightTrackPlugin PRIVATE /FS)
+add_library(lighttrack_persistence STATIC
+  src/infrastructure/persistence/LayoutFileRepository.h
+  src/infrastructure/persistence/LayoutFileRepository.cpp
+)
+add_library(lighttrack::persistence ALIAS lighttrack_persistence)
+target_include_directories(lighttrack_persistence PRIVATE
+  "${OPENRGB_DIR}/dependencies/json"
+)
+target_link_libraries(lighttrack_persistence
+  PUBLIC
+    lighttrack_application
+  PRIVATE
+    "Qt${QT_VERSION_MAJOR}::Core"
+)
+set_target_properties(lighttrack_persistence PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+
+# Object linkage is intentional: every effect translation unit contains a
+# static registrar and must reach the final plugin without archive stripping.
+add_library(lighttrack_openrgb OBJECT
+  src/integrations/openrgb/OpenRgbEffectCatalog.h
+  src/integrations/openrgb/OpenRgbEffectCatalog.cpp
+  src/integrations/openrgb/OpenRgbEffectFactory.h
+  src/integrations/openrgb/OpenRgbEffectFactory.cpp
+  src/integrations/openrgb/OpenRgbEffectsRuntime.h
+  src/integrations/openrgb/OpenRgbEffectsRuntime.cpp
+  src/integrations/openrgb/OpenRgbTimelineBackend.h
+  src/integrations/openrgb/OpenRgbTimelineBackend.cpp
+)
+add_library(lighttrack::openrgb ALIAS lighttrack_openrgb)
+target_link_libraries(lighttrack_openrgb PUBLIC
+  lighttrack_application
+)
+lighttrack_configure_openrgb_effects(
+  TARGET lighttrack_openrgb
+  OPENRGB_DIR ${OPENRGB_DIR}
+  OPENRGB_EFFECTS_PLUGIN_DIR ${OPENRGB_EFFECTS_PLUGIN_DIR}
+)
+
+# Keep the host ABI adapter and project resource entry in the final DLL only.
+add_library(LightTrackPlugin SHARED
+  LightTrackPlugin.qrc
+  src/plugin/LightTrackPlugin.h
+  src/plugin/LightTrackPlugin.cpp
+)
+target_link_libraries(LightTrackPlugin PRIVATE
+  lighttrack_application
+  lighttrack_page
+  lighttrack_audio
+  lighttrack_persistence
+  lighttrack_openrgb
+  "Qt${QT_VERSION_MAJOR}::Widgets"
+)
+set_target_properties(LightTrackPlugin PROPERTIES
+  AUTOMOC ON
+  AUTORCC ON
+)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_subdirectory(tests)
 endif()
