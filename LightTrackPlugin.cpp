@@ -11,21 +11,28 @@
 #include "OpenRGBEffectPage.h"
 #include "OpenRGBEffectSettings.h"
 
+#include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QAbstractScrollArea>
+#include <QAbstractSlider>
+#include <QAction>
 #include <QApplication>
 #include <QByteArray>
+#include <QChildEvent>
 #include <QColor>
+#include <QComboBox>
 #include <QCursor>
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
+#include <QDoubleSpinBox>
 #include <QDropEvent>
 #include <QEvent>
 #include <QFont>
 #include <QFontDatabase>
 #include <QFontMetrics>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -41,24 +48,33 @@
 #include <QHeaderView>
 #include <QIcon>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMetaObject>
 #include <QMimeData>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QPen>
 #include <QPixmap>
+#include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSaveFile>
 #include <QScrollBar>
 #include <QScrollArea>
+#include <QShortcut>
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStyleOptionGraphicsItem>
+#include <QTextEdit>
 #include <QTimer>
 #include <QTransform>
 #include <QTreeWidget>
@@ -73,6 +89,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -104,6 +121,20 @@ const qreal TIMELINE_TICK_TARGET_WIDTH = 90.0;
 const qreal RESIZE_HANDLE_WIDTH = 9.0;
 const qreal PLAYHEAD_HANDLE_RADIUS = 6.0;
 const int MUSIC_SPECTRUM_BARS = 1200;
+const int HISTORY_LIMIT = 100;
+const int LIGHTTRACK_LAYOUT_VERSION = 1;
+const char* LIGHTTRACK_LAYOUT_FORMAT = "OpenRGB LightTrack Layout";
+
+std::string ToUtf8String(const QString& value)
+{
+    const QByteArray utf8 = value.toUtf8();
+    return std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+}
+
+QString FromUtf8String(const std::string& value)
+{
+    return QString::fromUtf8(value.data(), static_cast<int>(value.size()));
+}
 
 struct EffectDefinition
 {
@@ -1119,6 +1150,18 @@ public:
         UpdatePlayhead();
     }
 
+    void SetMinimumContentDuration(qint64 duration_ms)
+    {
+        const qint64 clamped_duration_ms = qMax<qint64>(0, duration_ms);
+        if(minimum_content_duration_ms == clamped_duration_ms)
+        {
+            return;
+        }
+
+        minimum_content_duration_ms = clamped_duration_ms;
+        RebuildLayout();
+    }
+
     void SetMusicSeekCallback(std::function<void(qint64)> callback)
     {
         music_seek_callback = std::move(callback);
@@ -1132,6 +1175,30 @@ public:
     void SetClipRemovedCallback(std::function<void(TimelineClipItem*)> callback)
     {
         clip_removed_callback = std::move(callback);
+    }
+
+    void SetTimelineChangedCallback(std::function<void()> callback)
+    {
+        timeline_changed_callback = std::move(callback);
+    }
+
+    void ClearTimelineClips()
+    {
+        CancelDrag();
+        ClearClips();
+        RefreshInheritedClips();
+    }
+
+    TimelineClipItem* RestoreClip(const EffectDefinition& effect, int lane, qint64 start_ms, qint64 end_ms)
+    {
+        if(lane < 0 || lane >= lanes.size() || end_ms <= start_ms || pixels_per_second <= 0.0)
+        {
+            return nullptr;
+        }
+
+        const qreal x = start_ms * pixels_per_second / 1000.0;
+        const qreal width = qMax(CLIP_MIN_WIDTH, (end_ms - start_ms) * pixels_per_second / 1000.0);
+        return AddClip(effect, lane, x, width, false, false);
     }
 
     bool SetPixelsPerSecond(qreal value)
@@ -1187,6 +1254,26 @@ public:
         return states;
     }
 
+    QVector<TimelineClipState> PersistentTimelineClips() const
+    {
+        QVector<TimelineClipState> states;
+
+        if(pixels_per_second <= 0.0)
+        {
+            return states;
+        }
+
+        for(TimelineClipItem* clip : clips)
+        {
+            const qreal start_x = clip->pos().x();
+            states.push_back({clip, clip->Effect(), clip->LaneIndex(),
+                qMax<qint64>(0, qRound64(start_x * 1000.0 / pixels_per_second)),
+                qMax<qint64>(0, qRound64((start_x + clip->ClipWidth()) * 1000.0 / pixels_per_second))});
+        }
+
+        return states;
+    }
+
     bool PreviewEffectAt(const QString& effect_name, const QPointF& pos)
     {
         EffectDefinition effect;
@@ -1224,8 +1311,7 @@ public:
         }
 
         const qreal clip_width = DefaultClipWidth();
-        AddClip(effect, lane, pos.x() - clip_width / 2.0, clip_width);
-        return true;
+        return AddClip(effect, lane, pos.x() - clip_width / 2.0, clip_width, true, true) != nullptr;
     }
 
     void ClearPreview()
@@ -1247,6 +1333,11 @@ public:
         for(TimelineClipItem* clip : selected_clips)
         {
             RemoveClip(clip);
+        }
+
+        if(!selected_clips.empty())
+        {
+            NotifyTimelineChanged();
         }
 
         return !selected_clips.empty();
@@ -1343,6 +1434,7 @@ protected:
         drag_scene_start = event->scenePos();
         clip_start_x = clip->pos().x();
         clip_start_width = clip->ClipWidth();
+        clip_start_lane = clip->LaneIndex();
         active_clip->setOpacity(0.88);
         active_clip->setZValue(80.0);
 
@@ -1395,8 +1487,12 @@ protected:
 
         if(drag_mode == ClipMove || drag_mode == ClipResizeLeft || drag_mode == ClipResizeRight)
         {
+            bool changed = false;
             if(active_clip != nullptr)
             {
+                changed = active_clip->LaneIndex() != clip_start_lane
+                    || !qFuzzyCompare(active_clip->pos().x() + 1.0, clip_start_x + 1.0)
+                    || !qFuzzyCompare(active_clip->ClipWidth() + 1.0, clip_start_width + 1.0);
                 active_clip->setOpacity(1.0);
                 active_clip->setZValue(35.0);
             }
@@ -1404,6 +1500,10 @@ protected:
             HidePreview();
             active_clip = nullptr;
             drag_mode = NoDrag;
+            if(changed)
+            {
+                NotifyTimelineChanged();
+            }
             event->accept();
             return;
         }
@@ -1454,11 +1554,16 @@ private:
     {
         for(TimelineClipItem* clip : clips)
         {
+            if(clip_removed_callback)
+            {
+                clip_removed_callback(clip);
+            }
             removeItem(clip);
             delete clip;
         }
         clips.clear();
         active_clip = nullptr;
+        NotifyClipSelected(nullptr);
     }
 
     void RebuildLayout()
@@ -1468,7 +1573,10 @@ private:
 
         const int lane_count = qMax(1, visible_lane_indices.size());
         const qreal content_height = ROW_HEIGHT + lane_count * ROW_HEIGHT;
-        const qreal scene_width = qMax(qMax<qreal>(TIMELINE_MIN_WIDTH, viewport_size.width()), MusicPixelWidth());
+        const qreal minimum_content_width = minimum_content_duration_ms * pixels_per_second / 1000.0;
+        const qreal scene_width = qMax(
+            qMax(qMax<qreal>(TIMELINE_MIN_WIDTH, viewport_size.width()), MusicPixelWidth()),
+            minimum_content_width);
         const qreal scene_height = qMax<qreal>(content_height, viewport_size.height());
 
         setSceneRect(0.0, 0.0, scene_width, scene_height);
@@ -1820,23 +1928,44 @@ private:
         RefreshInheritedClips();
     }
 
-    void AddClip(const EffectDefinition& effect, int lane, qreal x, qreal width)
+    TimelineClipItem* AddClip(const EffectDefinition& effect, int lane, qreal x, qreal width,
+        bool select, bool notify_change)
     {
         if(lane < 0 || lane >= lanes.size())
         {
-            return;
+            return nullptr;
         }
 
         TimelineClipItem* clip = new TimelineClipItem(effect);
         clip->SetLaneIndex(lane);
         clip->SetClipWidth(width);
-        clip->setPos(ClampClipX(lane, x, width), ClipY(lane));
+        if(lanes[lane].rect.isValid() && !lanes[lane].rect.isEmpty())
+        {
+            clip->setPos(ClampClipX(lane, x, width), ClipY(lane));
+        }
+        else
+        {
+            clip->setPos(qMax<qreal>(0.0, x), 0.0);
+            clip->setVisible(false);
+        }
         addItem(clip);
         clips.push_back(clip);
-        clearSelection();
-        clip->setSelected(true);
-        NotifyClipSelected(clip);
+
+        if(select)
+        {
+            clearSelection();
+            clip->setSelected(true);
+            NotifyClipSelected(clip);
+        }
+
         RefreshInheritedClips();
+
+        if(notify_change)
+        {
+            NotifyTimelineChanged();
+        }
+
+        return clip;
     }
 
     qreal DefaultClipWidth() const
@@ -1875,6 +2004,14 @@ private:
         }
     }
 
+    void NotifyTimelineChanged()
+    {
+        if(timeline_changed_callback)
+        {
+            timeline_changed_callback();
+        }
+    }
+
     void CancelDrag()
     {
         if(active_clip != nullptr)
@@ -1900,8 +2037,10 @@ private:
     std::function<void(qint64)> music_seek_callback;
     std::function<void(TimelineClipItem*)> clip_selected_callback;
     std::function<void(TimelineClipItem*)> clip_removed_callback;
+    std::function<void()> timeline_changed_callback;
     qint64 music_duration_ms = 0;
     qint64 music_position_ms = 0;
+    qint64 minimum_content_duration_ms = 0;
     qreal pixels_per_second = GRID_WIDTH;
 
     DragMode drag_mode = NoDrag;
@@ -1909,6 +2048,7 @@ private:
     QPointF drag_scene_start;
     qreal clip_start_x = 0.0;
     qreal clip_start_width = CLIP_DEFAULT_WIDTH;
+    int clip_start_lane = -1;
     int last_preview_lane = -1;
     qreal last_preview_x = 0.0;
     qreal last_preview_width = CLIP_DEFAULT_WIDTH;
@@ -2309,9 +2449,30 @@ public:
         light_scene->SetMusicPosition(position_ms);
     }
 
+    void SetMinimumTimelineDuration(qint64 duration_ms)
+    {
+        light_scene->SetMinimumContentDuration(duration_ms);
+        SyncRuler();
+    }
+
     QVector<TimelineClipState> TimelineClips() const
     {
         return light_scene->TimelineClips();
+    }
+
+    QVector<TimelineClipState> PersistentTimelineClips() const
+    {
+        return light_scene->PersistentTimelineClips();
+    }
+
+    void ClearTimelineClips()
+    {
+        light_scene->ClearTimelineClips();
+    }
+
+    TimelineClipItem* RestoreClip(const EffectDefinition& effect, int lane, qint64 start_ms, qint64 end_ms)
+    {
+        return light_scene->RestoreClip(effect, lane, start_ms, end_ms);
     }
 
     void SetMusicSeekCallback(std::function<void(qint64)> callback)
@@ -2327,6 +2488,11 @@ public:
     void SetClipRemovedCallback(std::function<void(TimelineClipItem*)> callback)
     {
         light_scene->SetClipRemovedCallback(std::move(callback));
+    }
+
+    void SetTimelineChangedCallback(std::function<void()> callback)
+    {
+        light_scene->SetTimelineChangedCallback(std::move(callback));
     }
 
     void SetHorizontalZoom(int pixels_per_second)
@@ -2481,9 +2647,24 @@ public:
         QHBoxLayout* toolbar_left_layout = new QHBoxLayout(toolbar_left_group);
         toolbar_left_layout->setContentsMargins(0, 0, 0, 0);
         toolbar_left_layout->setSpacing(0);
-        toolbar_left_layout->addWidget(ToolbarButton(0xE2A1, toolbar_left_group));
-        toolbar_left_layout->addWidget(ToolbarButton(0xE2A0, toolbar_left_group));
-        toolbar_left_layout->addWidget(ToolbarButton(0xE14D, toolbar_left_group));
+        toolbar_undo_button = ToolbarButton(0xE2A1, toolbar_left_group);
+        toolbar_redo_button = ToolbarButton(0xE2A0, toolbar_left_group);
+        toolbar_save_button = ToolbarButton(0xE14D, toolbar_left_group);
+        toolbar_load_button = ToolbarButton(0xE318, toolbar_left_group);
+        toolbar_undo_button->setToolTip("Undo (Ctrl+Z)");
+        toolbar_redo_button->setToolTip("Redo (Ctrl+Shift+Z / Ctrl+Y)");
+        toolbar_save_button->setToolTip("Save layout (Ctrl+S)");
+        toolbar_load_button->setToolTip("Load layout (Ctrl+O)");
+        toolbar_undo_button->setAccessibleName("Undo");
+        toolbar_redo_button->setAccessibleName("Redo");
+        toolbar_save_button->setAccessibleName("Save layout");
+        toolbar_load_button->setAccessibleName("Load layout");
+        toolbar_undo_button->setEnabled(false);
+        toolbar_redo_button->setEnabled(false);
+        toolbar_left_layout->addWidget(toolbar_undo_button);
+        toolbar_left_layout->addWidget(toolbar_redo_button);
+        toolbar_left_layout->addWidget(toolbar_save_button);
+        toolbar_left_layout->addWidget(toolbar_load_button);
 
         toolbar_right_group = new QWidget(toolbar);
         toolbar_right_group->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
@@ -2529,6 +2710,9 @@ public:
         settings_stack = new QStackedWidget(this);
         music_timer = new QTimer(this);
         music_timer->setInterval(33);
+        history_commit_timer = new QTimer(this);
+        history_commit_timer->setSingleShot(true);
+        history_commit_timer->setInterval(250);
         view->SetRuler(ruler);
         view->SetMusicSeekCallback([this](qint64 position_ms)
         {
@@ -2552,6 +2736,11 @@ public:
         view->SetClipRemovedCallback([this](TimelineClipItem* clip)
         {
             RemoveClipSettings(clip);
+        });
+        view->SetTimelineChangedCallback([this]()
+        {
+            UpdateMinimumTimelineDuration();
+            CommitHistorySnapshot();
         });
 
         QWidget* track_area = new QWidget(content);
@@ -2621,6 +2810,22 @@ public:
         {
             ChooseMusic();
         });
+        connect(toolbar_undo_button, &QPushButton::clicked, this, [this]()
+        {
+            Undo();
+        });
+        connect(toolbar_redo_button, &QPushButton::clicked, this, [this]()
+        {
+            Redo();
+        });
+        connect(toolbar_save_button, &QPushButton::clicked, this, [this]()
+        {
+            SaveLayout();
+        });
+        connect(toolbar_load_button, &QPushButton::clicked, this, [this]()
+        {
+            LoadLayout();
+        });
         connect(toolbar_play_button, &QPushButton::clicked, this, [this]()
         {
             ToggleMusicPlayback();
@@ -2633,7 +2838,64 @@ public:
         {
             UpdateMusicPosition();
         });
+        connect(history_commit_timer, &QTimer::timeout, this, [this]()
+        {
+            CommitHistorySnapshot();
+        });
+
+        QShortcut* undo_shortcut = new QShortcut(QKeySequence::Undo, this);
+        undo_shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(undo_shortcut, &QShortcut::activated, this, [this]()
+        {
+            Undo();
+        });
+
+        QShortcut* redo_shortcut = new QShortcut(QKeySequence::Redo, this);
+        redo_shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(redo_shortcut, &QShortcut::activated, this, [this]()
+        {
+            Redo();
+        });
+
+        const QKeySequence alternate_redo_sequence(QStringLiteral("Ctrl+Y"));
+        if(QKeySequence(QKeySequence::Redo) != alternate_redo_sequence)
+        {
+            QShortcut* alternate_redo_shortcut = new QShortcut(alternate_redo_sequence, this);
+            alternate_redo_shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+            connect(alternate_redo_shortcut, &QShortcut::activated, this, [this]()
+            {
+                Redo();
+            });
+        }
+
+        const QKeySequence alternate_shift_redo_sequence(QStringLiteral("Ctrl+Shift+Z"));
+        if(QKeySequence(QKeySequence::Redo) != alternate_shift_redo_sequence)
+        {
+            QShortcut* alternate_shift_redo_shortcut =
+                new QShortcut(alternate_shift_redo_sequence, this);
+            alternate_shift_redo_shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+            connect(alternate_shift_redo_shortcut, &QShortcut::activated, this, [this]()
+            {
+                Redo();
+            });
+        }
+
+        QShortcut* save_shortcut = new QShortcut(QKeySequence::Save, this);
+        save_shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(save_shortcut, &QShortcut::activated, this, [this]()
+        {
+            SaveLayout();
+        });
+
+        QShortcut* load_shortcut = new QShortcut(QKeySequence::Open, this);
+        load_shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(load_shortcut, &QShortcut::activated, this, [this]()
+        {
+            LoadLayout();
+        });
+
         ReloadDevices();
+        InitializeHistory();
     }
 
     ~LightTrackPage() override
@@ -2645,8 +2907,48 @@ public:
         }
     }
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if(watched != nullptr && watched->property("lightTrackHistoryWatched").toBool())
+        {
+            if(event->type() == QEvent::ChildAdded)
+            {
+                QPointer<QObject> child = static_cast<QChildEvent*>(event)->child();
+                QTimer::singleShot(0, this, [this, child]()
+                {
+                    if(child != nullptr)
+                    {
+                        WatchSettingsObject(child);
+                    }
+                });
+            }
+            else if(event->type() == QEvent::MouseButtonRelease
+                || event->type() == QEvent::KeyRelease
+                || event->type() == QEvent::Wheel
+                || event->type() == QEvent::FocusOut
+                || event->type() == QEvent::Drop
+                || event->type() == QEvent::InputMethod)
+            {
+                ScheduleHistoryCommit();
+            }
+        }
+
+        return QWidget::eventFilter(watched, event);
+    }
+
+public:
     void ReloadDevices()
     {
+        json preserved_layout;
+        bool restore_layout = false;
+        if(history_initialized && !applying_snapshot)
+        {
+            FlushPendingHistory();
+            preserved_layout = current_history_snapshot;
+            restore_layout = true;
+        }
+
         StopRuntime();
         runtime_targets.clear();
         runtime_zones.clear();
@@ -2657,50 +2959,877 @@ public:
         if(resource_manager == nullptr)
         {
             empty_message = "OpenRGB resource manager unavailable";
-            SetLanes(lanes, empty_message);
-            return;
         }
-
-        std::vector<RGBController*>& controllers = resource_manager->GetRGBControllers();
-
-        if(controllers.empty())
+        else
         {
-            empty_message = "No devices";
-            SetLanes(lanes, empty_message);
-            return;
-        }
+            std::vector<RGBController*>& controllers = resource_manager->GetRGBControllers();
 
-        for(int controller_idx = 0; controller_idx < static_cast<int>(controllers.size()); controller_idx++)
-        {
-            RGBController* controller = controllers[controller_idx];
-            lanes.push_back({QString::fromStdString(controller->GetName()), 0, controller, -1, -1});
-
-            for(int zone_idx = 0; zone_idx < static_cast<int>(controller->zones.size()); zone_idx++)
+            if(controllers.empty())
             {
-                const zone& zone_ref = controller->zones[zone_idx];
-                const int zone_lane = lanes.size();
-                lanes.push_back({QString::fromStdString(zone_ref.name), 1, controller, zone_idx, -1});
-
-                if(zone_ref.segments.empty())
+                empty_message = "No devices";
+            }
+            else
+            {
+                for(int controller_idx = 0; controller_idx < static_cast<int>(controllers.size()); controller_idx++)
                 {
-                    AddRuntimeTarget(zone_lane, controller, zone_idx, -1);
-                    continue;
-                }
+                    RGBController* controller = controllers[controller_idx];
+                    lanes.push_back({QString::fromStdString(controller->GetName()), 0, controller, -1, -1});
 
-                for(int segment_idx = 0; segment_idx < static_cast<int>(zone_ref.segments.size()); segment_idx++)
-                {
-                    const segment& segment_ref = zone_ref.segments[segment_idx];
-                    const int segment_lane = lanes.size();
-                    lanes.push_back({QString::fromStdString(segment_ref.name), 2, controller, zone_idx, segment_idx});
-                    AddRuntimeTarget(segment_lane, controller, zone_idx, segment_idx);
+                    for(int zone_idx = 0; zone_idx < static_cast<int>(controller->zones.size()); zone_idx++)
+                    {
+                        const zone& zone_ref = controller->zones[zone_idx];
+                        const int zone_lane = lanes.size();
+                        lanes.push_back({QString::fromStdString(zone_ref.name), 1, controller, zone_idx, -1});
+
+                        if(zone_ref.segments.empty())
+                        {
+                            AddRuntimeTarget(zone_lane, controller, zone_idx, -1);
+                            continue;
+                        }
+
+                        for(int segment_idx = 0; segment_idx < static_cast<int>(zone_ref.segments.size()); segment_idx++)
+                        {
+                            const segment& segment_ref = zone_ref.segments[segment_idx];
+                            const int segment_lane = lanes.size();
+                            lanes.push_back({QString::fromStdString(segment_ref.name), 2, controller, zone_idx, segment_idx});
+                            AddRuntimeTarget(segment_lane, controller, zone_idx, segment_idx);
+                        }
+                    }
                 }
             }
         }
 
         SetLanes(lanes, empty_message);
+
+        if(restore_layout)
+        {
+            QString error;
+            QStringList warnings;
+            if(ApplyLayoutState(preserved_layout, &error, &warnings))
+            {
+                current_history_snapshot = preserved_layout;
+                UpdateHistoryButtons();
+            }
+            else
+            {
+                InitializeHistory();
+            }
+        }
     }
 
 private:
+    struct PreparedClipState
+    {
+        EffectDefinition definition;
+        int lane = -1;
+        qint64 start_ms = 0;
+        qint64 end_ms = 0;
+        std::unique_ptr<RGBEffect> effect;
+    };
+
+    void UpdateMinimumTimelineDuration()
+    {
+        qint64 content_duration_ms = music_duration_ms;
+        for(const TimelineClipState& clip : view->PersistentTimelineClips())
+        {
+            content_duration_ms = qMax(content_duration_ms, clip.end_ms);
+        }
+        view->SetMinimumTimelineDuration(content_duration_ms);
+    }
+
+    void WatchSettingsObject(QObject* object)
+    {
+        if(object == nullptr || object->property("lightTrackHistoryWatched").toBool())
+        {
+            return;
+        }
+
+        object->setProperty("lightTrackHistoryWatched", true);
+        object->installEventFilter(this);
+
+        if(QAbstractSlider* slider = qobject_cast<QAbstractSlider*>(object))
+        {
+            connect(slider, &QAbstractSlider::valueChanged, this, [this](int)
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        if(QAbstractButton* button = qobject_cast<QAbstractButton*>(object))
+        {
+            connect(button, &QAbstractButton::clicked, this, [this](bool)
+            {
+                ScheduleHistoryCommit();
+            });
+            connect(button, &QAbstractButton::toggled, this, [this](bool)
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        if(QAction* action = qobject_cast<QAction*>(object))
+        {
+            connect(action, &QAction::triggered, this, [this](bool)
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        if(QComboBox* combo_box = qobject_cast<QComboBox*>(object))
+        {
+            connect(combo_box, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        if(QSpinBox* spin_box = qobject_cast<QSpinBox*>(object))
+        {
+            connect(spin_box, qOverload<int>(&QSpinBox::valueChanged), this, [this](int)
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        if(QDoubleSpinBox* spin_box = qobject_cast<QDoubleSpinBox*>(object))
+        {
+            connect(spin_box, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double)
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        if(QLineEdit* line_edit = qobject_cast<QLineEdit*>(object))
+        {
+            connect(line_edit, &QLineEdit::editingFinished, this, [this]()
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        if(QTextEdit* text_edit = qobject_cast<QTextEdit*>(object))
+        {
+            connect(text_edit, &QTextEdit::textChanged, this, [this]()
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        if(QPlainTextEdit* text_edit = qobject_cast<QPlainTextEdit*>(object))
+        {
+            connect(text_edit, &QPlainTextEdit::textChanged, this, [this]()
+            {
+                ScheduleHistoryCommit();
+            });
+        }
+
+        const QObjectList children = object->children();
+        for(QObject* child : children)
+        {
+            WatchSettingsObject(child);
+        }
+    }
+
+    void ScheduleHistoryCommit()
+    {
+        if(applying_snapshot || !history_initialized || history_commit_timer == nullptr)
+        {
+            return;
+        }
+
+        if(settings_stack != nullptr && settings_stack->currentWidget() != nullptr)
+        {
+            WatchSettingsObject(settings_stack->currentWidget());
+        }
+        history_commit_timer->start();
+    }
+
+    void InitializeHistory()
+    {
+        QString error;
+        json snapshot;
+        undo_history.clear();
+        redo_history.clear();
+
+        if(TryCaptureLayoutState(&snapshot, &error))
+        {
+            current_history_snapshot = std::move(snapshot);
+            history_initialized = true;
+        }
+        else
+        {
+            current_history_snapshot = json::object();
+            history_initialized = false;
+        }
+
+        UpdateHistoryButtons();
+    }
+
+    void FlushPendingHistory()
+    {
+        if(history_commit_timer != nullptr && history_commit_timer->isActive())
+        {
+            history_commit_timer->stop();
+        }
+        CommitHistorySnapshot();
+    }
+
+    void PushHistory(std::vector<json>& history, const json& snapshot)
+    {
+        history.push_back(snapshot);
+        if(history.size() > HISTORY_LIMIT)
+        {
+            history.erase(history.begin());
+        }
+    }
+
+    void CommitHistorySnapshot()
+    {
+        if(applying_snapshot || !history_initialized)
+        {
+            return;
+        }
+
+        QString error;
+        json snapshot;
+        if(!TryCaptureLayoutState(&snapshot, &error) || snapshot == current_history_snapshot)
+        {
+            return;
+        }
+
+        PushHistory(undo_history, current_history_snapshot);
+        current_history_snapshot = std::move(snapshot);
+        redo_history.clear();
+        UpdateHistoryButtons();
+    }
+
+    void UpdateHistoryButtons()
+    {
+        if(toolbar_undo_button != nullptr)
+        {
+            toolbar_undo_button->setEnabled(history_initialized && !undo_history.empty());
+        }
+        if(toolbar_redo_button != nullptr)
+        {
+            toolbar_redo_button->setEnabled(history_initialized && !redo_history.empty());
+        }
+    }
+
+    void Undo()
+    {
+        FlushPendingHistory();
+        if(!history_initialized || undo_history.empty())
+        {
+            return;
+        }
+
+        const json previous = current_history_snapshot;
+        const json target = undo_history.back();
+        QString error;
+        QStringList warnings;
+
+        if(!ApplyLayoutState(target, &error, &warnings))
+        {
+            QMessageBox::critical(this, "Cannot undo", error);
+            return;
+        }
+
+        undo_history.pop_back();
+        PushHistory(redo_history, previous);
+        current_history_snapshot = target;
+        UpdateHistoryButtons();
+
+        if(!warnings.empty())
+        {
+            QMessageBox::warning(this, "Undo completed with warnings", warnings.join("\n"));
+        }
+    }
+
+    void Redo()
+    {
+        FlushPendingHistory();
+        if(!history_initialized || redo_history.empty())
+        {
+            return;
+        }
+
+        const json previous = current_history_snapshot;
+        const json target = redo_history.back();
+        QString error;
+        QStringList warnings;
+
+        if(!ApplyLayoutState(target, &error, &warnings))
+        {
+            QMessageBox::critical(this, "Cannot redo", error);
+            return;
+        }
+
+        redo_history.pop_back();
+        PushHistory(undo_history, previous);
+        current_history_snapshot = target;
+        UpdateHistoryButtons();
+
+        if(!warnings.empty())
+        {
+            QMessageBox::warning(this, "Redo completed with warnings", warnings.join("\n"));
+        }
+    }
+
+    json SerializeLane(int lane_index) const
+    {
+        if(lane_index < 0 || lane_index >= current_lanes.size())
+        {
+            throw std::runtime_error("Timeline clip references an invalid lane");
+        }
+
+        const LaneEntry& lane = current_lanes[lane_index];
+        json lane_json;
+        lane_json["fallbackIndex"] = lane_index;
+        lane_json["name"] = ToUtf8String(lane.name);
+        lane_json["level"] = lane.level;
+        lane_json["zoneIndex"] = lane.zone_index;
+        lane_json["segmentIndex"] = lane.segment_index;
+
+        if(lane.controller != nullptr)
+        {
+            lane_json["controller"] = {
+                {"name", lane.controller->GetName()},
+                {"location", lane.controller->GetLocation()},
+                {"serial", lane.controller->GetSerial()},
+                {"description", lane.controller->GetDescription()},
+                {"version", lane.controller->GetVersion()},
+                {"vendor", lane.controller->GetVendor()}
+            };
+        }
+
+        return lane_json;
+    }
+
+    bool ControllerMatches(RGBController* controller, const json& saved_controller) const
+    {
+        if(controller == nullptr || !saved_controller.is_object())
+        {
+            return false;
+        }
+
+        const auto matches = [&saved_controller](const char* key, const std::string& actual)
+        {
+            return !saved_controller.contains(key)
+                || (saved_controller[key].is_string() && saved_controller[key].get<std::string>() == actual);
+        };
+
+        if(!matches("name", controller->GetName())
+            || !matches("serial", controller->GetSerial())
+            || !matches("description", controller->GetDescription())
+            || !matches("version", controller->GetVersion())
+            || !matches("vendor", controller->GetVendor()))
+        {
+            return false;
+        }
+
+        if(saved_controller.contains("location"))
+        {
+            if(!saved_controller["location"].is_string())
+            {
+                return false;
+            }
+
+            const std::string saved_location = saved_controller["location"].get<std::string>();
+            const std::string current_location = controller->GetLocation();
+            const bool hid_location = saved_location.rfind("HID: ", 0) == 0
+                || current_location.rfind("HID: ", 0) == 0;
+
+            if(!hid_location && saved_location != current_location)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    int ResolveLane(const json& lane_json) const
+    {
+        if(!lane_json.is_object())
+        {
+            return -1;
+        }
+
+        const int zone_index = lane_json.value("zoneIndex", -1);
+        const int segment_index = lane_json.value("segmentIndex", -1);
+
+        if(lane_json.contains("controller") && lane_json["controller"].is_object())
+        {
+            for(int i = 0; i < current_lanes.size(); i++)
+            {
+                const LaneEntry& lane = current_lanes[i];
+                if(ControllerMatches(lane.controller, lane_json["controller"])
+                    && lane.zone_index == zone_index && lane.segment_index == segment_index)
+                {
+                    return i;
+                }
+            }
+
+            if(lane_json.contains("name") && lane_json["name"].is_string())
+            {
+                const QString saved_name = FromUtf8String(lane_json["name"].get<std::string>());
+                const int saved_level = lane_json.value("level", -1);
+
+                for(int i = 0; i < current_lanes.size(); i++)
+                {
+                    const LaneEntry& lane = current_lanes[i];
+                    if(ControllerMatches(lane.controller, lane_json["controller"])
+                        && lane.name == saved_name && lane.level == saved_level)
+                    {
+                        return i;
+                    }
+                }
+            }
+
+            return -1;
+        }
+
+        const int fallback_index = lane_json.value("fallbackIndex", -1);
+        return fallback_index >= 0 && fallback_index < current_lanes.size() ? fallback_index : -1;
+    }
+
+    void ApplyEffectSettings(RGBEffect* effect, const json& settings) const
+    {
+        if(effect == nullptr || !settings.is_object())
+        {
+            throw std::runtime_error("Invalid effect settings");
+        }
+
+        if(settings.contains("EffectClassName"))
+        {
+            if(!settings["EffectClassName"].is_string()
+                || settings["EffectClassName"].get<std::string>() != effect->EffectDetails.EffectClassName)
+            {
+                throw std::runtime_error("Effect settings do not match the timeline effect");
+            }
+        }
+
+        if(settings.contains("FPS"))
+        {
+            effect->SetFPS(settings["FPS"].get<unsigned int>());
+        }
+
+        if(settings.contains("UserColors"))
+        {
+            if(!settings["UserColors"].is_array() && !settings["UserColors"].is_null())
+            {
+                throw std::runtime_error("Invalid effect color list");
+            }
+
+            std::vector<RGBColor> colors;
+            for(const json& color : settings["UserColors"])
+            {
+                colors.push_back(color.get<RGBColor>());
+            }
+            effect->SetUserColors(colors);
+        }
+
+        if(settings.contains("Speed"))
+        {
+            effect->SetSpeed(settings["Speed"].get<unsigned int>());
+        }
+        if(settings.contains("Slider2Val"))
+        {
+            effect->SetSlider2Val(settings["Slider2Val"].get<unsigned int>());
+        }
+        if(settings.contains("RandomColors"))
+        {
+            effect->SetRandomColorsEnabled(settings["RandomColors"].get<bool>());
+        }
+        if(settings.contains("AllowOnlyFirst"))
+        {
+            effect->SetOnlyFirstColorEnabled(settings["AllowOnlyFirst"].get<bool>());
+        }
+        if(settings.contains("CustomName"))
+        {
+            effect->EffectDetails.CustomName = settings["CustomName"].get<std::string>();
+        }
+        if(settings.contains("Brightness"))
+        {
+            effect->SetBrightness(settings["Brightness"].get<unsigned int>());
+        }
+        if(settings.contains("Temperature"))
+        {
+            effect->SetTemperature(settings["Temperature"].get<int>());
+        }
+        if(settings.contains("Tint"))
+        {
+            effect->SetTint(settings["Tint"].get<int>());
+        }
+        if(settings.contains("CustomSettings"))
+        {
+            effect->LoadCustomSettings(settings["CustomSettings"]);
+        }
+    }
+
+    json CaptureLayoutState()
+    {
+        json layout;
+        layout["format"] = LIGHTTRACK_LAYOUT_FORMAT;
+        layout["version"] = LIGHTTRACK_LAYOUT_VERSION;
+        layout["music"] = {
+            {"path", ToUtf8String(music_path)},
+            {"durationMs", music_duration_ms}
+        };
+        layout["clips"] = json::array();
+
+        const QVector<TimelineClipState> clips = view->PersistentTimelineClips();
+        for(const TimelineClipState& clip : clips)
+        {
+            RGBEffect* runtime_effect = EnsureClipEffect(clip.clip);
+            if(runtime_effect == nullptr)
+            {
+                throw std::runtime_error(
+                    ToUtf8String(QString("Cannot serialize effect \"%1\"").arg(clip.effect.name)));
+            }
+
+            json clip_json;
+            clip_json["effectId"] = ToUtf8String(clip.effect.id);
+            clip_json["lane"] = SerializeLane(clip.lane);
+            clip_json["startMs"] = clip.start_ms;
+            clip_json["endMs"] = clip.end_ms;
+            clip_json["settings"] = runtime_effect->ToJson();
+            layout["clips"].push_back(std::move(clip_json));
+        }
+
+        return layout;
+    }
+
+    bool TryCaptureLayoutState(json* snapshot, QString* error)
+    {
+        try
+        {
+            if(snapshot != nullptr)
+            {
+                *snapshot = CaptureLayoutState();
+            }
+            return true;
+        }
+        catch(const std::exception& exception)
+        {
+            if(error != nullptr)
+            {
+                *error = QString("Could not serialize the current layout: %1")
+                    .arg(QString::fromUtf8(exception.what()));
+            }
+        }
+        catch(...)
+        {
+            if(error != nullptr)
+            {
+                *error = "Could not serialize the current layout.";
+            }
+        }
+
+        return false;
+    }
+
+    bool ApplyLayoutState(const json& layout, QString* error, QStringList* warnings)
+    {
+        if(warnings != nullptr)
+        {
+            warnings->clear();
+        }
+
+        try
+        {
+            if(!layout.is_object()
+                || !layout.contains("format") || !layout["format"].is_string()
+                || layout["format"].get<std::string>() != LIGHTTRACK_LAYOUT_FORMAT)
+            {
+                throw std::runtime_error("This is not a LightTrack layout file");
+            }
+
+            if(!layout.contains("version") || !layout["version"].is_number_integer())
+            {
+                throw std::runtime_error("The layout version is missing");
+            }
+
+            const int version = layout["version"].get<int>();
+            if(version != LIGHTTRACK_LAYOUT_VERSION)
+            {
+                throw std::runtime_error("This LightTrack layout version is not supported");
+            }
+
+            QString saved_music_path;
+            qint64 saved_music_duration = 0;
+            if(layout.contains("music"))
+            {
+                if(!layout["music"].is_object())
+                {
+                    throw std::runtime_error("Invalid music settings");
+                }
+
+                const json& music = layout["music"];
+                if(music.contains("path"))
+                {
+                    if(!music["path"].is_string())
+                    {
+                        throw std::runtime_error("Invalid music file path");
+                    }
+                    saved_music_path = FromUtf8String(music["path"].get<std::string>());
+                }
+                if(music.contains("durationMs"))
+                {
+                    saved_music_duration = qMax<qint64>(0, music["durationMs"].get<qint64>());
+                }
+            }
+            qint64 restored_timeline_duration_ms = saved_music_duration;
+
+            if(!layout.contains("clips") || !layout["clips"].is_array())
+            {
+                throw std::runtime_error("Invalid timeline clip list");
+            }
+
+            std::vector<PreparedClipState> prepared_clips;
+            prepared_clips.reserve(layout["clips"].size());
+            int clip_number = 0;
+
+            for(const json& clip_json : layout["clips"])
+            {
+                clip_number++;
+                if(!clip_json.is_object()
+                    || !clip_json.contains("effectId") || !clip_json["effectId"].is_string()
+                    || !clip_json.contains("lane")
+                    || !clip_json.contains("startMs") || !clip_json["startMs"].is_number_integer()
+                    || !clip_json.contains("endMs") || !clip_json["endMs"].is_number_integer()
+                    || !clip_json.contains("settings") || !clip_json["settings"].is_object())
+                {
+                    throw std::runtime_error(
+                        ToUtf8String(QString("Timeline clip %1 is invalid").arg(clip_number)));
+                }
+
+                const QString effect_id = FromUtf8String(clip_json["effectId"].get<std::string>());
+                EffectDefinition definition;
+                if(!FindEffect(effect_id, &definition))
+                {
+                    if(warnings != nullptr)
+                    {
+                        warnings->push_back(
+                            QString("Skipped clip %1: effect \"%2\" is unavailable.")
+                                .arg(clip_number).arg(effect_id));
+                    }
+                    continue;
+                }
+
+                const int lane = ResolveLane(clip_json["lane"]);
+                if(lane < 0)
+                {
+                    if(warnings != nullptr)
+                    {
+                        warnings->push_back(
+                            QString("Skipped clip %1 (%2): its device or zone is unavailable.")
+                                .arg(clip_number).arg(definition.name));
+                    }
+                    continue;
+                }
+
+                const qint64 start_ms = clip_json["startMs"].get<qint64>();
+                const qint64 end_ms = clip_json["endMs"].get<qint64>();
+                if(start_ms < 0 || end_ms <= start_ms)
+                {
+                    throw std::runtime_error(
+                        ToUtf8String(QString("Timeline clip %1 has an invalid time range").arg(clip_number)));
+                }
+                restored_timeline_duration_ms = qMax(restored_timeline_duration_ms, end_ms);
+
+                std::unique_ptr<RGBEffect> runtime_effect(CreateRuntimeEffect(definition));
+                if(runtime_effect == nullptr)
+                {
+                    throw std::runtime_error(
+                        ToUtf8String(QString("Could not create effect \"%1\"").arg(definition.name)));
+                }
+
+                try
+                {
+                    ApplyEffectSettings(runtime_effect.get(), clip_json["settings"]);
+                }
+                catch(const std::exception& exception)
+                {
+                    throw std::runtime_error(
+                        ToUtf8String(QString("Could not restore clip %1 (%2): %3")
+                            .arg(clip_number).arg(definition.name)
+                            .arg(QString::fromUtf8(exception.what()))));
+                }
+
+                prepared_clips.push_back({
+                    definition, lane, start_ms, end_ms, std::move(runtime_effect)
+                });
+            }
+
+            if(history_commit_timer != nullptr)
+            {
+                history_commit_timer->stop();
+            }
+
+            applying_snapshot = true;
+            view->ClearTimelineClips();
+            view->SetMinimumTimelineDuration(restored_timeline_duration_ms);
+            const bool music_available = SetMusicFile(saved_music_path, saved_music_duration);
+
+            if(!saved_music_path.isEmpty() && !music_available && warnings != nullptr)
+            {
+                warnings->push_back(
+                    QString("The music file could not be opened: %1").arg(saved_music_path));
+            }
+
+            for(PreparedClipState& prepared : prepared_clips)
+            {
+                TimelineClipItem* clip = view->RestoreClip(
+                    prepared.definition, prepared.lane, prepared.start_ms, prepared.end_ms);
+                if(clip == nullptr)
+                {
+                    throw std::runtime_error("Could not restore a timeline clip");
+                }
+
+                CreateClipSettings(clip, prepared.effect.release());
+            }
+
+            settings_stack->setCurrentWidget(settings_placeholder);
+            applying_snapshot = false;
+            return true;
+        }
+        catch(const std::exception& exception)
+        {
+            applying_snapshot = false;
+            if(error != nullptr)
+            {
+                *error = QString::fromUtf8(exception.what());
+            }
+        }
+        catch(...)
+        {
+            applying_snapshot = false;
+            if(error != nullptr)
+            {
+                *error = "The layout could not be restored.";
+            }
+        }
+
+        return false;
+    }
+
+    void SaveLayout()
+    {
+        FlushPendingHistory();
+
+        QString error;
+        json layout;
+        if(!TryCaptureLayoutState(&layout, &error))
+        {
+            QMessageBox::critical(this, "Cannot save layout", error);
+            return;
+        }
+
+        const QString suggested_path = current_layout_path.isEmpty()
+            ? QStringLiteral("lighttrack-layout.lighttrack")
+            : current_layout_path;
+        QString path = QFileDialog::getSaveFileName(this, "Save LightTrack layout",
+            suggested_path, "LightTrack Layout (*.lighttrack);;JSON Files (*.json);;All Files (*.*)");
+
+        if(path.isEmpty())
+        {
+            return;
+        }
+
+        if(QFileInfo(path).suffix().isEmpty())
+        {
+            path += ".lighttrack";
+        }
+
+        QSaveFile file(path);
+        if(!file.open(QIODevice::WriteOnly | QIODevice::Text))
+        {
+            QMessageBox::critical(this, "Cannot save layout",
+                QString("Could not open the file for writing:\n%1").arg(file.errorString()));
+            return;
+        }
+
+        const QByteArray contents = QByteArray::fromStdString(layout.dump(2));
+        if(file.write(contents) != contents.size() || !file.commit())
+        {
+            QMessageBox::critical(this, "Cannot save layout",
+                QString("Could not write the layout file:\n%1").arg(file.errorString()));
+            return;
+        }
+
+        current_layout_path = QFileInfo(path).absoluteFilePath();
+        toolbar_save_button->setToolTip(
+            QString("Save layout (Ctrl+S)\nLast saved: %1").arg(current_layout_path));
+    }
+
+    void LoadLayout()
+    {
+        const QString start_path = current_layout_path.isEmpty()
+            ? QString()
+            : QFileInfo(current_layout_path).absolutePath();
+        const QString path = QFileDialog::getOpenFileName(this, "Load LightTrack layout",
+            start_path, "LightTrack Layout (*.lighttrack *.json);;All Files (*.*)");
+
+        if(path.isEmpty())
+        {
+            return;
+        }
+
+        QFile file(path);
+        if(!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            QMessageBox::critical(this, "Cannot load layout",
+                QString("Could not open the layout file:\n%1").arg(file.errorString()));
+            return;
+        }
+
+        json layout;
+        try
+        {
+            const QByteArray contents = file.readAll();
+            layout = json::parse(contents.constData(), contents.constData() + contents.size());
+
+            if(layout.is_object() && layout.contains("music") && layout["music"].is_object()
+                && layout["music"].contains("path") && layout["music"]["path"].is_string())
+            {
+                const QString music_path_from_file =
+                    FromUtf8String(layout["music"]["path"].get<std::string>());
+                if(!music_path_from_file.isEmpty() && QFileInfo(music_path_from_file).isRelative())
+                {
+                    const QString absolute_music_path =
+                        QFileInfo(QFileInfo(path).dir(), music_path_from_file).absoluteFilePath();
+                    layout["music"]["path"] = ToUtf8String(absolute_music_path);
+                }
+            }
+        }
+        catch(const std::exception& exception)
+        {
+            QMessageBox::critical(this, "Cannot load layout",
+                QString("The layout file is invalid:\n%1").arg(QString::fromUtf8(exception.what())));
+            return;
+        }
+
+        FlushPendingHistory();
+        QString error;
+        QStringList warnings;
+        if(!ApplyLayoutState(layout, &error, &warnings))
+        {
+            QMessageBox::critical(this, "Cannot load layout", error);
+            return;
+        }
+
+        current_layout_path = QFileInfo(path).absoluteFilePath();
+        CommitHistorySnapshot();
+        toolbar_save_button->setToolTip(
+            QString("Save layout (Ctrl+S)\nCurrent file: %1").arg(current_layout_path));
+
+        if(!warnings.empty())
+        {
+            QMessageBox::warning(this, "Layout loaded with warnings", warnings.join("\n"));
+        }
+    }
+
     void AddRuntimeTarget(int lane, RGBController* controller, int zone_idx, int segment_idx)
     {
         runtime_zones.push_back(std::make_unique<ControllerZone>(controller, static_cast<unsigned int>(zone_idx), false, 100, segment_idx >= 0, segment_idx));
@@ -2857,6 +3986,18 @@ private:
             return nullptr;
         }
 
+        CreateClipSettings(clip, effect);
+        return effect;
+    }
+
+    void CreateClipSettings(const TimelineClipItem* clip, RGBEffect* effect)
+    {
+        if(clip == nullptr || effect == nullptr)
+        {
+            delete effect;
+            return;
+        }
+
         OpenRGBEffectPage* page = new OpenRGBEffectPage(nullptr, effect);
         page->SetPreviewButtonVisible(false);
         page->setMinimumWidth(0);
@@ -2872,7 +4013,7 @@ private:
 
         clip_effects[clip] = effect;
         clip_settings[clip] = scroll_area;
-        return effect;
+        WatchSettingsObject(page);
     }
 
     void ShowClipSettings(TimelineClipItem* clip)
@@ -3080,6 +4221,41 @@ private:
         SendBlackToTargets(inactive_targets, false);
     }
 
+    bool SetMusicFile(const QString& path, qint64 expected_duration_ms)
+    {
+        CloseMusic();
+        music_path = path;
+        music_spectrum_preview.clear();
+        view->SetMusicPosition(0);
+
+        if(path.isEmpty())
+        {
+            toolbar_music_button->setText("Select Music File");
+            toolbar_music_button->setToolTip("Select Music File");
+            view->SetMusicSpectrum({}, 0);
+            UpdateToolbarSideWidths();
+            return true;
+        }
+
+        const QFileInfo file_info(path);
+        toolbar_music_button->setText(file_info.fileName().isEmpty() ? path : file_info.fileName());
+        toolbar_music_button->setToolTip(path);
+        UpdateToolbarSideWidths();
+
+        if(!OpenMusic(path))
+        {
+            music_duration_ms = qMax<qint64>(0, expected_duration_ms);
+            toolbar_music_button->setToolTip(path + "\nCannot play this file");
+            view->SetMusicSpectrum({}, music_duration_ms);
+            return false;
+        }
+
+        music_spectrum_preview = BuildMusicSpectrumPreview(path);
+        view->SetMusicSpectrum(music_spectrum_preview, music_duration_ms);
+        SetPlaybackControls(true, false);
+        return true;
+    }
+
     void ChooseMusic()
     {
         const QString path = QFileDialog::getOpenFileName(this, "Select music", QString(),
@@ -3090,26 +4266,14 @@ private:
             return;
         }
 
-        CloseMusic();
-        music_path = path;
-        music_spectrum_preview.clear();
-        view->SetMusicPosition(0);
-
-        const QFileInfo file_info(path);
-        toolbar_music_button->setText(file_info.fileName());
-        toolbar_music_button->setToolTip(path);
-        UpdateToolbarSideWidths();
-
-        if(!OpenMusic(path))
+        qint64 content_duration_ms = 0;
+        for(const TimelineClipState& clip : view->PersistentTimelineClips())
         {
-            toolbar_music_button->setToolTip(path + "\nCannot play this file");
-            view->SetMusicSpectrum({}, 0);
-            return;
+            content_duration_ms = qMax(content_duration_ms, clip.end_ms);
         }
-
-        music_spectrum_preview = BuildMusicSpectrumPreview(path);
-        view->SetMusicSpectrum(music_spectrum_preview, music_duration_ms);
-        SetPlaybackControls(true, false);
+        view->SetMinimumTimelineDuration(content_duration_ms);
+        SetMusicFile(QFileInfo(path).absoluteFilePath(), 0);
+        CommitHistorySnapshot();
     }
 
     bool OpenMusic(const QString& path)
@@ -3321,16 +4485,17 @@ private:
             music_timer->stop();
         }
 
+        const qint64 known_duration_ms = music_duration_ms;
         music_loaded = false;
         music_playing = false;
-        music_duration_ms = 0;
         music_spectrum_preview.clear();
         if(music_sound_ready)
         {
             ma_sound_uninit(&music_sound);
             music_sound_ready = false;
         }
-        view->SetMusicSpectrum({}, 0);
+        music_duration_ms = known_duration_ms;
+        view->SetMusicSpectrum({}, music_duration_ms);
 
         SetPlaybackControls(false, false);
 
@@ -3355,7 +4520,7 @@ private:
             return;
         }
 
-        const int icon_group_width = static_cast<int>(TOOLBAR_HEIGHT * 3.0);
+        const int icon_group_width = static_cast<int>(TOOLBAR_HEIGHT * 4.0);
         const int right_group_width = toolbar_right_group->layout() != nullptr ?
             toolbar_right_group->layout()->sizeHint().width() :
             toolbar_music_button->sizeHint().width();
@@ -3383,12 +4548,18 @@ private:
     QLabel* settings_placeholder;
     QWidget* toolbar_left_group = nullptr;
     QWidget* toolbar_right_group = nullptr;
+    QPushButton* toolbar_undo_button = nullptr;
+    QPushButton* toolbar_redo_button = nullptr;
+    QPushButton* toolbar_save_button = nullptr;
+    QPushButton* toolbar_load_button = nullptr;
     QPushButton* toolbar_music_button = nullptr;
     QPushButton* toolbar_play_button = nullptr;
     QTimer* music_timer = nullptr;
+    QTimer* history_commit_timer = nullptr;
     ma_engine music_engine;
     ma_sound music_sound;
     QString music_path;
+    QString current_layout_path;
     qint64 music_duration_ms = 0;
     bool music_engine_ready = false;
     bool music_sound_ready = false;
@@ -3401,6 +4572,11 @@ private:
     std::map<const TimelineClipItem*, RGBEffect*> clip_effects;
     std::map<const TimelineClipItem*, QWidget*> clip_settings;
     std::map<const TimelineClipItem*, std::vector<ControllerZone*>> runtime_assignments;
+    std::vector<json> undo_history;
+    std::vector<json> redo_history;
+    json current_history_snapshot;
+    bool history_initialized = false;
+    bool applying_snapshot = false;
     bool runtime_running = false;
 };
 }
