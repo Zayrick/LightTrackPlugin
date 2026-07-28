@@ -255,6 +255,28 @@ LightTrackPage::LightTrackPage(
         UpdateMinimumTimelineDuration();
         CommitHistorySnapshot();
     });
+    timeline_editor->SetLaneRenamedCallback(
+        [this](int lane_index, const QString& name)
+        {
+            return this->backend != nullptr
+                && this->backend->RenameLane(lane_index, name);
+        });
+    timeline_editor->SetLaneHighlightedCallback(
+        [this](int lane_index, bool highlighted)
+        {
+            return this->backend != nullptr
+                && this->backend->SetLaneHighlighted(
+                    lane_index,
+                    highlighted);
+        });
+    timeline_editor->SetLaneDisabledCallback(
+        [this](int lane_index, bool disabled)
+        {
+            return this->backend != nullptr
+                && this->backend->SetLaneDisabled(
+                    lane_index,
+                    disabled);
+        });
 
     QWidget* right_column = new QWidget(this);
     QVBoxLayout* right_layout =

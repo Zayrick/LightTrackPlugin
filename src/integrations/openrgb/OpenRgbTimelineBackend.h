@@ -25,6 +25,15 @@ public:
     DeviceSnapshot ReloadDevices() override;
     QByteArray SerializeLane(int lane_index) const override;
     int ResolveLane(const QByteArray& serialized_lane) const override;
+    bool RenameLane(
+        int lane_index,
+        const QString& name) override;
+    bool SetLaneHighlighted(
+        int lane_index,
+        bool highlighted) override;
+    bool SetLaneDisabled(
+        int lane_index,
+        bool disabled) override;
 
     EffectPtr CreateEffect(
         const QString& effect_id,

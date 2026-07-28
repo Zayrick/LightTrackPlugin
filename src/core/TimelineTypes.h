@@ -48,6 +48,8 @@ struct TimelineLane
     QString id;
     QString name;
     int level = 0;
+    bool highlighted = false;
+    bool disabled = false;
 };
 
 struct TimelineClip

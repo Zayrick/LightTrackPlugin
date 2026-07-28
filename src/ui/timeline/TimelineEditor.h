@@ -21,6 +21,10 @@ public:
     using ClipSelectedCallback = std::function<void(std::optional<ClipId>)>;
     using ClipRemovedCallback = std::function<void(ClipId)>;
     using TimelineChangedCallback = std::function<void()>;
+    using LaneRenamedCallback =
+        std::function<bool(int, const QString&)>;
+    using LaneStateChangedCallback =
+        std::function<bool(int, bool)>;
 
     explicit TimelineEditor(QWidget* parent = nullptr);
     ~TimelineEditor() override;
@@ -51,6 +55,11 @@ public:
     void SetClipSelectedCallback(ClipSelectedCallback callback);
     void SetClipRemovedCallback(ClipRemovedCallback callback);
     void SetTimelineChangedCallback(TimelineChangedCallback callback);
+    void SetLaneRenamedCallback(LaneRenamedCallback callback);
+    void SetLaneHighlightedCallback(
+        LaneStateChangedCallback callback);
+    void SetLaneDisabledCallback(
+        LaneStateChangedCallback callback);
 
 private:
     std::unique_ptr<TimelineEditorPrivate> d;

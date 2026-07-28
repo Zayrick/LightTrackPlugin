@@ -6,12 +6,15 @@
 #include <QDrag>
 #include <QEvent>
 #include <QHeaderView>
+#include <QInputDialog>
+#include <QLineEdit>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPixmap>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QStyleOptionViewItem>
 #include <QStyledItemDelegate>
@@ -116,14 +119,14 @@ public:
 
             if(checked)
             {
+                const QColor accent =
+                    action_index == 2
+                    ? QColor(235, 86, 86)
+                    : QColor(64, 188, 255);
                 painter->setPen(QPen(
-                    QColor(64, 188, 255, 180),
+                    WithAlpha(accent, 180),
                     1.0));
-                painter->setBrush(QColor(
-                    64,
-                    188,
-                    255,
-                    70));
+                painter->setBrush(WithAlpha(accent, 70));
                 painter->drawRoundedRect(
                     QRectF(button_rect).adjusted(
                         0.5,
@@ -171,7 +174,7 @@ public:
             return false;
         }
 
-        for(int action_index = 1;
+        for(int action_index = 0;
             action_index < LANE_ACTION_BUTTON_COUNT;
             ++action_index)
         {
@@ -180,6 +183,27 @@ public:
             if(!button_rect.contains(mouse_event->pos()))
             {
                 continue;
+            }
+
+            if(action_index == 0)
+            {
+                bool accepted = false;
+                const QString current_name =
+                    index.data(Qt::DisplayRole).toString();
+                const QString new_name = QInputDialog::getText(
+                    qobject_cast<QWidget*>(parent()),
+                    QStringLiteral("Rename zone"),
+                    QStringLiteral("Name:"),
+                    QLineEdit::Normal,
+                    current_name,
+                    &accepted).trimmed();
+                if(accepted
+                    && !new_name.isEmpty()
+                    && new_name != current_name)
+                {
+                    model->setData(index, new_name, Qt::EditRole);
+                }
+                return true;
             }
 
             const int action_bit = 1 << (action_index - 1);
@@ -696,6 +720,14 @@ LaneListWidget::LaneListWidget(QWidget* parent) :
         {
             NotifyVisibleLanesChanged();
         });
+    connect(
+        this,
+        &QTreeWidget::itemChanged,
+        this,
+        [this](QTreeWidgetItem* item, int column)
+        {
+            HandleItemChanged(item, column);
+        });
 }
 
 void LaneListWidget::SetLanes(const QVector<TimelineLane>& lanes)
@@ -738,12 +770,24 @@ void LaneListWidget::SetLanes(const QVector<TimelineLane>& lanes)
                 QStringList(lane.name));
 
         item->setData(0, LaneIndexRole, lane_index);
-        item->setData(0, LaneActionStateRole, 0);
+        const int action_state =
+            (lane.highlighted ? 1 : 0)
+            | (lane.disabled ? 2 : 0);
+        item->setData(0, LaneActionStateRole, action_state);
+        item->setData(0, LaneCommittedNameRole, lane.name);
+        item->setData(
+            0,
+            LaneCommittedActionStateRole,
+            action_state);
         item->setFlags(Qt::ItemIsEnabled);
         item->setSizeHint(
             0,
             QSize(0, static_cast<int>(ROW_HEIGHT)));
-        item->setToolTip(0, lane.name);
+        item->setToolTip(
+            0,
+            QStringLiteral(
+                "%1\nRename / Light zone / Disable zone")
+                .arg(lane.name));
 
         if(lane.level == 0)
         {
@@ -764,6 +808,24 @@ void LaneListWidget::SetVisibilityChangedCallback(
     std::function<void(const QVector<int>&)> callback)
 {
     visibility_changed_callback = std::move(callback);
+}
+
+void LaneListWidget::SetLaneRenamedCallback(
+    TimelineEditor::LaneRenamedCallback callback)
+{
+    lane_renamed_callback = std::move(callback);
+}
+
+void LaneListWidget::SetLaneHighlightedCallback(
+    TimelineEditor::LaneStateChangedCallback callback)
+{
+    lane_highlighted_callback = std::move(callback);
+}
+
+void LaneListWidget::SetLaneDisabledCallback(
+    TimelineEditor::LaneStateChangedCallback callback)
+{
+    lane_disabled_callback = std::move(callback);
 }
 
 QVector<int> LaneListWidget::VisibleLaneIndices() const
@@ -818,6 +880,95 @@ void LaneListWidget::AppendVisibleLaneIndices(
     {
         AppendVisibleLaneIndices(item->child(i), indices);
     }
+}
+
+void LaneListWidget::HandleItemChanged(
+    QTreeWidgetItem* item,
+    int column)
+{
+    if(rebuilding || item == nullptr || column != 0)
+    {
+        return;
+    }
+
+    const int lane_index =
+        item->data(0, LaneIndexRole).toInt();
+    if(lane_index < 0)
+    {
+        return;
+    }
+
+    const QSignalBlocker blocker(this);
+    const QString committed_name =
+        item->data(0, LaneCommittedNameRole).toString();
+    const QString requested_name = item->text(0).trimmed();
+    if(requested_name != committed_name)
+    {
+        const bool accepted =
+            !requested_name.isEmpty()
+            && (!lane_renamed_callback
+                || lane_renamed_callback(
+                    lane_index,
+                    requested_name));
+        if(accepted)
+        {
+            item->setText(0, requested_name);
+            item->setData(
+                0,
+                LaneCommittedNameRole,
+                requested_name);
+            item->setToolTip(
+                0,
+                QStringLiteral(
+                    "%1\nRename / Light zone / Disable zone")
+                    .arg(requested_name));
+        }
+        else
+        {
+            item->setText(0, committed_name);
+        }
+    }
+
+    int committed_state =
+        item->data(
+            0,
+            LaneCommittedActionStateRole).toInt();
+    const int requested_state =
+        item->data(0, LaneActionStateRole).toInt();
+
+    if((requested_state & 1) != (committed_state & 1))
+    {
+        const bool highlighted = (requested_state & 1) != 0;
+        if(!lane_highlighted_callback
+            || lane_highlighted_callback(
+                lane_index,
+                highlighted))
+        {
+            committed_state =
+                highlighted
+                ? committed_state | 1
+                : committed_state & ~1;
+        }
+    }
+
+    if((requested_state & 2) != (committed_state & 2))
+    {
+        const bool disabled = (requested_state & 2) != 0;
+        if(!lane_disabled_callback
+            || lane_disabled_callback(lane_index, disabled))
+        {
+            committed_state =
+                disabled
+                ? committed_state | 2
+                : committed_state & ~2;
+        }
+    }
+
+    item->setData(
+        0,
+        LaneCommittedActionStateRole,
+        committed_state);
+    item->setData(0, LaneActionStateRole, committed_state);
 }
 
 void LaneListWidget::NotifyVisibleLanesChanged()

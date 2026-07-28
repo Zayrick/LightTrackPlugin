@@ -14,6 +14,7 @@
 #include <QPointer>
 #include <QScrollArea>
 #include <QSizePolicy>
+#include <QTimer>
 
 #include <nlohmann/json.hpp>
 
@@ -120,6 +121,16 @@ struct LaneEntry
     RGBController* controller = nullptr;
     int zone_index = -1;
     int segment_index = -1;
+    QString state_key;
+    bool highlighted = false;
+    bool disabled = false;
+};
+
+struct LaneState
+{
+    QString name;
+    bool highlighted = false;
+    bool disabled = false;
 };
 
 struct RuntimeTarget
@@ -137,16 +148,31 @@ public:
     explicit Impl(ResourceManagerInterface* resource_manager) :
         resource_manager_(resource_manager)
     {
+        override_timer_.setInterval(50);
+        override_timer_.setTimerType(Qt::PreciseTimer);
+        QObject::connect(
+            &override_timer_,
+            &QTimer::timeout,
+            [this]()
+            {
+                SendOverrideFrame();
+            });
     }
 
     ~Impl()
     {
+        shutting_down_ = true;
+        override_timer_.stop();
         ClearClips();
+        SendBlackToTargets(AllRuntimeZones(), true);
     }
 
     TimelineBackend::DeviceSnapshot ReloadDevices()
     {
+        override_timer_.stop();
         StopRuntime();
+        SendBlackToTargets(AllRuntimeZones(), true);
+        override_timer_.stop();
         runtime_targets_.clear();
         runtime_zones_.clear();
         lanes_.clear();
@@ -177,27 +203,24 @@ public:
                 continue;
             }
 
-            lanes_.push_back({
+            AddLane(
                 QString::fromStdString(controller->GetName()),
                 0,
                 controller,
                 -1,
-                -1
-            });
+                -1);
 
             for(int zone_index = 0;
                 zone_index < static_cast<int>(controller->zones.size());
                 ++zone_index)
             {
                 const zone& zone_ref = controller->zones[zone_index];
-                const int zone_lane = lanes_.size();
-                lanes_.push_back({
+                const int zone_lane = AddLane(
                     QString::fromStdString(zone_ref.name),
                     1,
                     controller,
                     zone_index,
-                    -1
-                });
+                    -1);
 
                 if(zone_ref.segments.empty())
                 {
@@ -216,14 +239,12 @@ public:
                 {
                     const segment& segment_ref =
                         zone_ref.segments[segment_index];
-                    const int segment_lane = lanes_.size();
-                    lanes_.push_back({
+                    const int segment_lane = AddLane(
                         QString::fromStdString(segment_ref.name),
                         2,
                         controller,
                         zone_index,
-                        segment_index
-                    });
+                        segment_index);
                     AddRuntimeTarget(
                         segment_lane,
                         controller,
@@ -240,10 +261,62 @@ public:
             snapshot.lanes.push_back({
                 QString::number(index),
                 lane.name,
-                lane.level
+                lane.level,
+                lane.highlighted,
+                lane.disabled
             });
         }
+        UpdateOverrideTimer();
+        SendOverrideFrame();
         return snapshot;
+    }
+
+    bool RenameLane(int lane_index, const QString& name)
+    {
+        const QString trimmed_name = name.trimmed();
+        if(lane_index < 0
+            || lane_index >= lanes_.size()
+            || trimmed_name.isEmpty())
+        {
+            return false;
+        }
+
+        LaneEntry& lane = lanes_[lane_index];
+        lane.name = trimmed_name;
+        lane_states_[lane.state_key].name = trimmed_name;
+        return true;
+    }
+
+    bool SetLaneHighlighted(int lane_index, bool highlighted)
+    {
+        if(lane_index < 0 || lane_index >= lanes_.size())
+        {
+            return false;
+        }
+
+        const std::vector<ControllerZone*> previous_overrides =
+            OverriddenTargets();
+        LaneEntry& lane = lanes_[lane_index];
+        lane.highlighted = highlighted;
+        lane_states_[lane.state_key].highlighted = highlighted;
+        RefreshOverrideOutput(previous_overrides);
+        return true;
+    }
+
+    bool SetLaneDisabled(int lane_index, bool disabled)
+    {
+        if(lane_index < 0 || lane_index >= lanes_.size())
+        {
+            return false;
+        }
+
+        const std::vector<ControllerZone*> previous_overrides =
+            OverriddenTargets();
+        LaneEntry& lane = lanes_[lane_index];
+        lane.disabled = disabled;
+        lane_states_[lane.state_key].disabled = disabled;
+        RefreshOverrideOutput(previous_overrides);
+        return true;
     }
 
     QByteArray SerializeLane(int lane_index) const
@@ -526,6 +599,8 @@ public:
         qint64 position_ms,
         const QVector<TimelineClip>& clips)
     {
+        last_position_ms_ = position_ms;
+        last_clips_ = clips;
         if(runtime_running_)
         {
             SyncRuntime(position_ms, clips);
@@ -535,6 +610,7 @@ public:
         runtime_running_ = true;
         SendBlackToTargets(AllRuntimeZones(), true);
         SyncRuntime(position_ms, clips);
+        SendOverrideFrame();
     }
 
     void StopRuntime()
@@ -554,12 +630,19 @@ public:
         {
             SendBlackToTargets(AllRuntimeZones(), true);
         }
+        if(!shutting_down_)
+        {
+            UpdateOverrideTimer();
+            SendOverrideFrame();
+        }
     }
 
     void SyncRuntime(
         qint64 position_ms,
         const QVector<TimelineClip>& clips)
     {
+        last_position_ms_ = position_ms;
+        last_clips_ = clips;
         if(!runtime_running_)
         {
             return;
@@ -571,6 +654,11 @@ public:
         for(const RuntimeTarget& target : runtime_targets_)
         {
             if(target.zone == nullptr)
+            {
+                continue;
+            }
+            if(IsTargetDisabled(target.lane)
+                || IsTargetHighlighted(target.lane))
             {
                 continue;
             }
@@ -671,6 +759,8 @@ public:
         for(const RuntimeTarget& target : runtime_targets_)
         {
             if(target.zone != nullptr
+                && !IsTargetDisabled(target.lane)
+                && !IsTargetHighlighted(target.lane)
                 && active_targets.find(target.zone)
                     == active_targets.end())
             {
@@ -679,6 +769,7 @@ public:
         }
 
         SendBlackToTargets(inactive_targets, false);
+        UpdateOverrideTimer();
     }
 
 private:
@@ -804,6 +895,62 @@ private:
             : -1;
     }
 
+    QString LaneStateKey(
+        RGBController* controller,
+        int zone_index,
+        int segment_index) const
+    {
+        if(controller == nullptr)
+        {
+            return {};
+        }
+
+        const json identity = {
+            {"name", controller->GetName()},
+            {"location", controller->GetLocation()},
+            {"serial", controller->GetSerial()},
+            {"description", controller->GetDescription()},
+            {"version", controller->GetVersion()},
+            {"vendor", controller->GetVendor()},
+            {"zoneIndex", zone_index},
+            {"segmentIndex", segment_index}
+        };
+        return FromUtf8String(identity.dump());
+    }
+
+    int AddLane(
+        const QString& native_name,
+        int level,
+        RGBController* controller,
+        int zone_index,
+        int segment_index)
+    {
+        LaneEntry lane;
+        lane.name = native_name;
+        lane.level = level;
+        lane.controller = controller;
+        lane.zone_index = zone_index;
+        lane.segment_index = segment_index;
+        lane.state_key = LaneStateKey(
+            controller,
+            zone_index,
+            segment_index);
+
+        const auto saved = lane_states_.find(lane.state_key);
+        if(saved != lane_states_.end())
+        {
+            if(!saved->second.name.isEmpty())
+            {
+                lane.name = saved->second.name;
+            }
+            lane.highlighted = saved->second.highlighted;
+            lane.disabled = saved->second.disabled;
+        }
+
+        lanes_.push_back(std::move(lane));
+        return lanes_.size() - 1;
+    }
+
     void AddRuntimeTarget(
         int lane,
         RGBController* controller,
@@ -834,6 +981,132 @@ private:
             }
         }
         return zones;
+    }
+
+    bool IsTargetHighlighted(int target_lane) const
+    {
+        if(target_lane < 0 || target_lane >= lanes_.size())
+        {
+            return false;
+        }
+        for(int lane = 0; lane <= target_lane; ++lane)
+        {
+            if(lanes_[lane].highlighted
+                && LaneCoversTarget(lane, target_lane))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool IsTargetDisabled(int target_lane) const
+    {
+        if(target_lane < 0 || target_lane >= lanes_.size())
+        {
+            return false;
+        }
+        for(int lane = 0; lane <= target_lane; ++lane)
+        {
+            if(lanes_[lane].disabled
+                && LaneCoversTarget(lane, target_lane))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::vector<ControllerZone*> OverriddenTargets() const
+    {
+        std::vector<ControllerZone*> zones;
+        for(const RuntimeTarget& target : runtime_targets_)
+        {
+            if(target.zone != nullptr
+                && (IsTargetDisabled(target.lane)
+                    || IsTargetHighlighted(target.lane)))
+            {
+                zones.push_back(target.zone);
+            }
+        }
+        return zones;
+    }
+
+    void UpdateOverrideTimer()
+    {
+        if(OverriddenTargets().empty())
+        {
+            override_timer_.stop();
+        }
+        else if(!override_timer_.isActive())
+        {
+            override_timer_.start();
+        }
+    }
+
+    void RefreshOverrideOutput(
+        const std::vector<ControllerZone*>& previous_overrides)
+    {
+        UpdateOverrideTimer();
+        if(runtime_running_)
+        {
+            SyncRuntime(last_position_ms_, last_clips_);
+            SendOverrideFrame();
+            return;
+        }
+
+        const std::vector<ControllerZone*> current_overrides =
+            OverriddenTargets();
+        const std::set<ControllerZone*> current_set(
+            current_overrides.begin(),
+            current_overrides.end());
+        std::vector<ControllerZone*> released;
+        for(ControllerZone* zone : previous_overrides)
+        {
+            if(current_set.find(zone) == current_set.end())
+            {
+                released.push_back(zone);
+            }
+        }
+
+        SendBlackToTargets(released, true);
+        SendOverrideFrame();
+    }
+
+    void SendOverrideFrame()
+    {
+        std::set<RGBController*> controllers;
+        for(const RuntimeTarget& target : runtime_targets_)
+        {
+            if(target.zone == nullptr
+                || target.zone->controller == nullptr)
+            {
+                continue;
+            }
+
+            RGBColor color;
+            if(IsTargetDisabled(target.lane))
+            {
+                color = ColorUtils::OFF();
+            }
+            else if(IsTargetHighlighted(target.lane))
+            {
+                color = ToRGBColor(255, 255, 255);
+            }
+            else
+            {
+                continue;
+            }
+
+            target.zone->SetAllZoneLEDs(color, 100, 0, 0);
+            controllers.insert(target.zone->controller);
+        }
+
+        for(RGBController* controller : controllers)
+        {
+            ForceDirectMode(controller);
+            controller->UpdateLEDs();
+        }
     }
 
     void ForceDirectMode(RGBController* controller) const
@@ -946,12 +1219,17 @@ private:
     ResourceManagerInterface* resource_manager_ = nullptr;
     EffectFactory effect_factory_;
     QVector<LaneEntry> lanes_;
+    std::map<QString, LaneState> lane_states_;
     std::vector<std::unique_ptr<ControllerZone>> runtime_zones_;
     QVector<RuntimeTarget> runtime_targets_;
     std::map<ClipId, TimelineBackend::EffectPtr> clip_effects_;
     std::map<ClipId, std::vector<ControllerZone*>>
         runtime_assignments_;
+    QTimer override_timer_;
+    QVector<TimelineClip> last_clips_;
+    qint64 last_position_ms_ = 0;
     bool runtime_running_ = false;
+    bool shutting_down_ = false;
 };
 
 OpenRgbTimelineBackend::OpenRgbTimelineBackend(
@@ -992,6 +1270,27 @@ int OpenRgbTimelineBackend::ResolveLane(
     const QByteArray& serialized_lane) const
 {
     return impl_->ResolveLane(serialized_lane);
+}
+
+bool OpenRgbTimelineBackend::RenameLane(
+    int lane_index,
+    const QString& name)
+{
+    return impl_->RenameLane(lane_index, name);
+}
+
+bool OpenRgbTimelineBackend::SetLaneHighlighted(
+    int lane_index,
+    bool highlighted)
+{
+    return impl_->SetLaneHighlighted(lane_index, highlighted);
+}
+
+bool OpenRgbTimelineBackend::SetLaneDisabled(
+    int lane_index,
+    bool disabled)
+{
+    return impl_->SetLaneDisabled(lane_index, disabled);
 }
 
 TimelineBackend::EffectPtr OpenRgbTimelineBackend::CreateEffect(

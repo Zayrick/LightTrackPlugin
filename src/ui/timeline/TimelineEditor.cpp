@@ -241,4 +241,24 @@ void TimelineEditor::SetTimelineChangedCallback(
 {
     d->view->SetTimelineChangedCallback(std::move(callback));
 }
+
+void TimelineEditor::SetLaneRenamedCallback(
+    LaneRenamedCallback callback)
+{
+    d->lane_list->SetLaneRenamedCallback(std::move(callback));
+}
+
+void TimelineEditor::SetLaneHighlightedCallback(
+    LaneStateChangedCallback callback)
+{
+    d->lane_list->SetLaneHighlightedCallback(
+        std::move(callback));
+}
+
+void TimelineEditor::SetLaneDisabledCallback(
+    LaneStateChangedCallback callback)
+{
+    d->lane_list->SetLaneDisabledCallback(
+        std::move(callback));
+}
 }

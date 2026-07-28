@@ -71,7 +71,9 @@ enum EffectListRole
 {
     EffectIdRole = Qt::UserRole + 1,
     LaneIndexRole,
-    LaneActionStateRole
+    LaneActionStateRole,
+    LaneCommittedNameRole,
+    LaneCommittedActionStateRole
 };
 
 struct LaneInfo
@@ -400,6 +402,12 @@ public:
     void SetLanes(const QVector<TimelineLane>& lanes);
     void SetVisibilityChangedCallback(
         std::function<void(const QVector<int>&)> callback);
+    void SetLaneRenamedCallback(
+        TimelineEditor::LaneRenamedCallback callback);
+    void SetLaneHighlightedCallback(
+        TimelineEditor::LaneStateChangedCallback callback);
+    void SetLaneDisabledCallback(
+        TimelineEditor::LaneStateChangedCallback callback);
     QVector<int> VisibleLaneIndices() const;
 
 protected:
@@ -412,10 +420,16 @@ private:
     void AppendVisibleLaneIndices(
         const QTreeWidgetItem* item,
         QVector<int>& indices) const;
+    void HandleItemChanged(QTreeWidgetItem* item, int column);
     void NotifyVisibleLanesChanged();
     bool rebuilding = false;
     std::function<void(const QVector<int>&)>
         visibility_changed_callback;
+    TimelineEditor::LaneRenamedCallback lane_renamed_callback;
+    TimelineEditor::LaneStateChangedCallback
+        lane_highlighted_callback;
+    TimelineEditor::LaneStateChangedCallback
+        lane_disabled_callback;
 };
 
 class EffectsListWidget final : public QTreeWidget

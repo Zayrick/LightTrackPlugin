@@ -53,6 +53,15 @@ public:
     virtual DeviceSnapshot ReloadDevices() = 0;
     virtual QByteArray SerializeLane(int lane_index) const = 0;
     virtual int ResolveLane(const QByteArray& serialized_lane) const = 0;
+    virtual bool RenameLane(
+        int lane_index,
+        const QString& name) = 0;
+    virtual bool SetLaneHighlighted(
+        int lane_index,
+        bool highlighted) = 0;
+    virtual bool SetLaneDisabled(
+        int lane_index,
+        bool disabled) = 0;
 
     virtual EffectPtr CreateEffect(
         const QString& effect_id,
