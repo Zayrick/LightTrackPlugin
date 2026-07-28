@@ -70,7 +70,8 @@ using lighttrack::ui::HeaderLabel;
 enum EffectListRole
 {
     EffectIdRole = Qt::UserRole + 1,
-    LaneIndexRole
+    LaneIndexRole,
+    LaneActionStateRole
 };
 
 struct LaneInfo
@@ -377,6 +378,7 @@ class TimelineRulerWidget final : public QWidget
 {
 public:
     explicit TimelineRulerWidget(QWidget* parent = nullptr);
+    void SetLabelWidth(qreal width);
     void SetContentWidth(qreal width);
     void SetPixelsPerSecond(qreal value);
     void SetScrollOffset(int offset);
@@ -385,6 +387,7 @@ protected:
     void paintEvent(QPaintEvent*) override;
 
 private:
+    qreal label_width = LABEL_WIDTH;
     qreal content_width = TIMELINE_MIN_WIDTH;
     qreal pixels_per_second = GRID_WIDTH;
     int horizontal_offset = 0;

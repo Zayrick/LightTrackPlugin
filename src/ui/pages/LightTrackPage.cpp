@@ -8,7 +8,6 @@
 #include "ui/timeline/TimelineEditor.h"
 
 #include <QFont>
-#include <QFontDatabase>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -29,26 +28,6 @@ namespace
 {
 using namespace lighttrack::ui::page_detail;
 
-QString LucideFontFamily()
-{
-    static const QString family = []()
-    {
-        const int font_id = QFontDatabase::addApplicationFont(
-            ":/lighttrack/fonts/lucide.ttf");
-        if(font_id < 0)
-        {
-            return QString();
-        }
-
-        const QStringList families =
-            QFontDatabase::applicationFontFamilies(font_id);
-        return families.isEmpty()
-            ? QString()
-            : families.first();
-    }();
-    return family;
-}
-
 QPushButton* ToolbarButton(
     ushort codepoint,
     QWidget* parent)
@@ -60,7 +39,7 @@ QPushButton* ToolbarButton(
         static_cast<int>(TOOLBAR_BUTTON_SIZE));
     button->setFocusPolicy(Qt::NoFocus);
 
-    QFont font(LucideFontFamily());
+    QFont font(lighttrack::ui::LucideFontFamily());
     font.setPixelSize(
         static_cast<int>(TOOLBAR_ICON_SIZE));
     button->setFont(font);

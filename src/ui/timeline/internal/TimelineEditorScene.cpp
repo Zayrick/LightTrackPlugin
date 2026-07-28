@@ -1326,6 +1326,17 @@ TimelineRulerWidget::TimelineRulerWidget(QWidget* parent) :
     setFixedHeight(static_cast<int>(RULER_HEIGHT));
 }
 
+void TimelineRulerWidget::SetLabelWidth(qreal width)
+{
+    const qreal bounded_width = qMax<qreal>(0.0, width);
+    if(qFuzzyCompare(label_width, bounded_width))
+    {
+        return;
+    }
+    label_width = bounded_width;
+    update();
+}
+
 void TimelineRulerWidget::SetContentWidth(qreal width)
 {
     if(qFuzzyCompare(content_width, width))
@@ -1369,10 +1380,10 @@ void TimelineRulerWidget::paintEvent(QPaintEvent*)
         TextLineColor(palette(), 90, 120);
     const QColor text_color =
         TextLineColor(palette(), 160, 180);
-    const qreal label_width =
-        qMin<qreal>(LABEL_WIDTH, width());
+    const qreal visible_label_width =
+        qMin<qreal>(label_width, width());
     const qreal timeline_width =
-        qMax<qreal>(0.0, width() - label_width);
+        qMax<qreal>(0.0, width() - visible_label_width);
     const QRectF frame_rect(
         0.5,
         0.5,
@@ -1382,8 +1393,8 @@ void TimelineRulerWidget::paintEvent(QPaintEvent*)
     painter.setPen(QPen(line_color));
     painter.drawRect(frame_rect);
     painter.drawLine(
-        QPointF(label_width - 0.5, 0.0),
-        QPointF(label_width - 0.5, height()));
+        QPointF(visible_label_width - 0.5, 0.0),
+        QPointF(visible_label_width - 0.5, height()));
 
     QFont label_font = painter.font();
     label_font.setBold(true);
@@ -1393,14 +1404,20 @@ void TimelineRulerWidget::paintEvent(QPaintEvent*)
         QRectF(
             8.0,
             0.0,
-            qMax<qreal>(0.0, label_width - 16.0),
+            qMax<qreal>(
+                0.0,
+                visible_label_width - 16.0),
             height()),
         Qt::AlignVCenter | Qt::AlignLeft,
         QStringLiteral("Device"));
 
     painter.save();
     painter.setClipRect(
-        QRectF(label_width, 0.0, timeline_width, height()));
+        QRectF(
+            visible_label_width,
+            0.0,
+            timeline_width,
+            height()));
     painter.setFont(font());
 
     const qint64 tick_interval_ms =
@@ -1425,7 +1442,7 @@ void TimelineRulerWidget::paintEvent(QPaintEvent*)
     {
         const qreal x = tick * tick_width;
         const qreal view_x =
-            label_width + x - horizontal_offset;
+            visible_label_width + x - horizontal_offset;
 
         painter.setPen(QPen(line_color));
         painter.drawLine(

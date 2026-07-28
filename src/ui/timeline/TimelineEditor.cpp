@@ -5,6 +5,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QScrollBar>
+#include <QSplitter>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -53,13 +54,29 @@ public:
         timeline_body_layout->setContentsMargins(0, 0, 0, 0);
         timeline_body_layout->setSpacing(0);
 
-        lane_list = new LaneListWidget(timeline_body);
-        lane_list->setFixedWidth(static_cast<int>(LABEL_WIDTH));
-        view = new LightTrackView(timeline_body);
+        QSplitter* track_splitter =
+            new QSplitter(Qt::Horizontal, timeline_body);
+        track_splitter->setChildrenCollapsible(false);
+        track_splitter->setHandleWidth(static_cast<int>(GAP));
+
+        lane_list = new LaneListWidget(track_splitter);
+        lane_list->setMinimumWidth(180);
+        view = new LightTrackView(track_splitter);
+        view->setMinimumWidth(320);
         view->SetRuler(ruler);
 
-        timeline_body_layout->addWidget(lane_list);
-        timeline_body_layout->addWidget(view, 1);
+        track_splitter->addWidget(lane_list);
+        track_splitter->addWidget(view);
+        track_splitter->setStretchFactor(0, 0);
+        track_splitter->setStretchFactor(1, 1);
+        track_splitter->setSizes({
+            static_cast<int>(LABEL_WIDTH),
+            static_cast<int>(TIMELINE_MIN_WIDTH)
+        });
+        ruler->SetLabelWidth(
+            LABEL_WIDTH + track_splitter->handleWidth());
+
+        timeline_body_layout->addWidget(track_splitter);
         track_layout->addWidget(timeline_body, 1);
 
         editor_layout->addWidget(effects_column);
@@ -76,6 +93,16 @@ public:
             &QScrollBar::valueChanged,
             view->verticalScrollBar(),
             &QScrollBar::setValue);
+        QObject::connect(
+            track_splitter,
+            &QSplitter::splitterMoved,
+            editor,
+            [this, track_splitter](int, int)
+            {
+                ruler->SetLabelWidth(
+                    lane_list->width()
+                    + track_splitter->handleWidth());
+            });
 
         lane_list->SetVisibilityChangedCallback(
             [this](const QVector<int>& lane_indices)

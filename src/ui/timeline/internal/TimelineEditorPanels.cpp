@@ -14,13 +14,189 @@
 #include <QScrollBar>
 #include <QStyle>
 #include <QStyleOptionViewItem>
+#include <QStyledItemDelegate>
 #include <QTreeWidgetItem>
 #include <QWheelEvent>
 
+#include <array>
 #include <utility>
 
 namespace lighttrack::timeline_internal
 {
+namespace
+{
+inline constexpr int LANE_ACTION_BUTTON_SIZE = 24;
+inline constexpr int LANE_ACTION_BUTTON_SPACING = 3;
+inline constexpr int LANE_ACTION_RIGHT_MARGIN = 5;
+inline constexpr int LANE_ACTION_ICON_SIZE = 15;
+
+inline constexpr std::array<ushort, 3> LANE_ACTION_ICONS = {
+    0xE172,
+    0xE1C2,
+    0xE051
+};
+inline constexpr int LANE_ACTION_BUTTON_COUNT =
+    static_cast<int>(LANE_ACTION_ICONS.size());
+inline constexpr int LANE_ACTION_BUTTONS_WIDTH =
+    LANE_ACTION_BUTTON_COUNT * LANE_ACTION_BUTTON_SIZE
+    + (LANE_ACTION_BUTTON_COUNT - 1)
+        * LANE_ACTION_BUTTON_SPACING;
+inline constexpr int LANE_ACTIONS_WIDTH =
+    LANE_ACTION_BUTTONS_WIDTH + LANE_ACTION_RIGHT_MARGIN;
+
+QRect LaneActionButtonRect(
+    const QStyleOptionViewItem& option,
+    int action_index)
+{
+    return {
+        option.rect.right()
+            - LANE_ACTION_RIGHT_MARGIN
+            - LANE_ACTION_BUTTONS_WIDTH
+            + 1
+            + action_index
+                * (LANE_ACTION_BUTTON_SIZE
+                    + LANE_ACTION_BUTTON_SPACING),
+        option.rect.top()
+            + (option.rect.height()
+                - LANE_ACTION_BUTTON_SIZE)
+                / 2,
+        LANE_ACTION_BUTTON_SIZE,
+        LANE_ACTION_BUTTON_SIZE
+    };
+}
+
+class LaneItemDelegate final : public QStyledItemDelegate
+{
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(
+        QPainter* painter,
+        const QStyleOptionViewItem& option,
+        const QModelIndex& index) const override
+    {
+        const bool has_actions =
+            index.data(LaneIndexRole).toInt() >= 0;
+        if(!has_actions)
+        {
+            QStyledItemDelegate::paint(painter, option, index);
+            return;
+        }
+
+        QStyleOptionViewItem content_option(option);
+        content_option.rect.adjust(
+            0,
+            0,
+            -LANE_ACTIONS_WIDTH,
+            0);
+        QStyledItemDelegate::paint(
+            painter,
+            content_option,
+            index);
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+
+        QFont icon_font(lighttrack::ui::LucideFontFamily());
+        icon_font.setPixelSize(LANE_ACTION_ICON_SIZE);
+        painter->setFont(icon_font);
+
+        const int action_state =
+            index.data(LaneActionStateRole).toInt();
+        for(int action_index = 0;
+            action_index < LANE_ACTION_BUTTON_COUNT;
+            ++action_index)
+        {
+            const QRect button_rect =
+                LaneActionButtonRect(option, action_index);
+            const bool checked =
+                action_index > 0
+                && (action_state
+                    & (1 << (action_index - 1))) != 0;
+
+            if(checked)
+            {
+                painter->setPen(QPen(
+                    QColor(64, 188, 255, 180),
+                    1.0));
+                painter->setBrush(QColor(
+                    64,
+                    188,
+                    255,
+                    70));
+                painter->drawRoundedRect(
+                    QRectF(button_rect).adjusted(
+                        0.5,
+                        0.5,
+                        -0.5,
+                        -0.5),
+                    5.0,
+                    5.0);
+            }
+
+            painter->setPen(
+                option.palette.color(QPalette::ButtonText));
+            painter->drawText(
+                button_rect,
+                Qt::AlignCenter,
+                QString(QChar(
+                    LANE_ACTION_ICONS[
+                        static_cast<std::size_t>(
+                            action_index)])));
+        }
+
+        painter->restore();
+    }
+
+    bool editorEvent(
+        QEvent* event,
+        QAbstractItemModel* model,
+        const QStyleOptionViewItem& option,
+        const QModelIndex& index) override
+    {
+        if(event->type() != QEvent::MouseButtonRelease
+            || index.data(LaneIndexRole).toInt() < 0)
+        {
+            return QStyledItemDelegate::editorEvent(
+                event,
+                model,
+                option,
+                index);
+        }
+
+        const QMouseEvent* mouse_event =
+            static_cast<QMouseEvent*>(event);
+        if(mouse_event->button() != Qt::LeftButton)
+        {
+            return false;
+        }
+
+        for(int action_index = 1;
+            action_index < LANE_ACTION_BUTTON_COUNT;
+            ++action_index)
+        {
+            const QRect button_rect =
+                LaneActionButtonRect(option, action_index);
+            if(!button_rect.contains(mouse_event->pos()))
+            {
+                continue;
+            }
+
+            const int action_bit = 1 << (action_index - 1);
+            const int current_state =
+                index.data(LaneActionStateRole).toInt();
+            model->setData(
+                index,
+                current_state ^ action_bit,
+                LaneActionStateRole);
+            return true;
+        }
+
+        return false;
+    }
+};
+}
+
 OverlayScrollBar::OverlayScrollBar(
     QAbstractScrollArea* scroll_area,
     Qt::Orientation orientation) :
@@ -502,6 +678,7 @@ LaneListWidget::LaneListWidget(QWidget* parent) :
     setSelectionMode(QAbstractItemView::NoSelection);
     setUniformRowHeights(true);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    setItemDelegate(new LaneItemDelegate(this));
 
     connect(
         this,
@@ -561,6 +738,7 @@ void LaneListWidget::SetLanes(const QVector<TimelineLane>& lanes)
                 QStringList(lane.name));
 
         item->setData(0, LaneIndexRole, lane_index);
+        item->setData(0, LaneActionStateRole, 0);
         item->setFlags(Qt::ItemIsEnabled);
         item->setSizeHint(
             0,
