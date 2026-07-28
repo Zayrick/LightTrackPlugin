@@ -6,7 +6,6 @@
 
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QLayout>
 #include <QPushButton>
 #include <QTimer>
 
@@ -71,7 +70,6 @@ bool LightTrackPage::SetMusicFile(
         toolbar_music_button->setToolTip(
             "Select Music File");
         timeline_editor->SetMusicSpectrum({}, 0);
-        UpdateToolbarSideWidths();
         return true;
     }
 
@@ -81,7 +79,6 @@ bool LightTrackPage::SetMusicFile(
             ? path
             : file_info.fileName());
     toolbar_music_button->setToolTip(path);
-    UpdateToolbarSideWidths();
 
     if(!OpenMusic(path))
     {
@@ -315,27 +312,6 @@ void LightTrackPage::MarkMusicError()
         toolbar_music_button->setToolTip(
             music_path + "\nCannot play this file");
     }
-}
-
-void LightTrackPage::UpdateToolbarSideWidths()
-{
-    if(toolbar_left_group == nullptr
-        || toolbar_right_group == nullptr
-        || toolbar_music_button == nullptr)
-    {
-        return;
-    }
-
-    const int icon_group_width =
-        static_cast<int>(TOOLBAR_HEIGHT * 4.0);
-    const int right_group_width =
-        toolbar_right_group->layout() != nullptr
-        ? toolbar_right_group->layout()->sizeHint().width()
-        : toolbar_music_button->sizeHint().width();
-    const int side_width =
-        qMax(icon_group_width, right_group_width);
-    toolbar_left_group->setFixedWidth(side_width);
-    toolbar_right_group->setFixedWidth(side_width);
 }
 
 void LightTrackPage::SetPlaybackControls(

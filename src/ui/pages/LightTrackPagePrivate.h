@@ -29,8 +29,11 @@ class TimelineEditor;
 namespace lighttrack::ui::page_detail
 {
 inline constexpr qreal PAGE_MARGIN = 10.0;
-inline constexpr qreal TOOLBAR_HEIGHT = 36.0;
-inline constexpr qreal TOOLBAR_ICON_SIZE = 20.0;
+inline constexpr qreal TOOLBAR_HEIGHT = 32.0;
+inline constexpr qreal TOOLBAR_BUTTON_SIZE = 28.0;
+inline constexpr qreal TOOLBAR_ICON_SIZE = 17.0;
+inline constexpr qreal TOOLBAR_BUTTON_SPACING = 2.0;
+inline constexpr qreal TOOLBAR_SEPARATOR_GAP = 6.0;
 inline constexpr qreal SETTINGS_PANEL_MIN_WIDTH = 300.0;
 inline constexpr qreal SETTINGS_PANEL_PREFERRED_WIDTH = 480.0;
 inline constexpr int MUSIC_SPECTRUM_BARS = 1200;
@@ -113,7 +116,6 @@ private:
     void FinishMusicPlayback();
     void MarkMusicError();
 
-    void UpdateToolbarSideWidths();
     void SetPlaybackControls(bool enabled, bool playing);
 
     std::unique_ptr<TimelineBackend> backend;
@@ -122,8 +124,6 @@ private:
     TimelineEditor* timeline_editor = nullptr;
     QStackedWidget* settings_stack = nullptr;
     QLabel* settings_placeholder = nullptr;
-    QWidget* toolbar_left_group = nullptr;
-    QWidget* toolbar_right_group = nullptr;
     QPushButton* toolbar_undo_button = nullptr;
     QPushButton* toolbar_redo_button = nullptr;
     QPushButton* toolbar_save_button = nullptr;

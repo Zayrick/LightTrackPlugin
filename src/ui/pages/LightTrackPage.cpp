@@ -10,6 +10,7 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
@@ -55,8 +56,8 @@ QPushButton* ToolbarButton(
     QPushButton* button =
         new QPushButton(QString(QChar(codepoint)), parent);
     button->setFixedSize(
-        static_cast<int>(TOOLBAR_HEIGHT),
-        static_cast<int>(TOOLBAR_HEIGHT));
+        static_cast<int>(TOOLBAR_BUTTON_SIZE),
+        static_cast<int>(TOOLBAR_BUTTON_SIZE));
     button->setFocusPolicy(Qt::NoFocus);
 
     QFont font(LucideFontFamily());
@@ -97,7 +98,7 @@ LightTrackPage::LightTrackPage(
         QWidget#lightTrackToolbar QPushButton {
             background-color: transparent;
             border: 1px solid transparent;
-            border-radius: 8px;
+            border-radius: 6px;
             padding: 0;
         }
 
@@ -122,23 +123,29 @@ LightTrackPage::LightTrackPage(
             padding: 0 10px;
         }
     )");
-    QHBoxLayout* toolbar_layout =
-        new QHBoxLayout(toolbar);
+    QGridLayout* toolbar_layout =
+        new QGridLayout(toolbar);
     toolbar_layout->setContentsMargins(0, 0, 0, 0);
     toolbar_layout->setSpacing(0);
+    toolbar_layout->setColumnStretch(0, 1);
+    toolbar_layout->setColumnStretch(1, 0);
+    toolbar_layout->setColumnStretch(2, 1);
 
-    toolbar_left_group = new QWidget(toolbar);
+    QWidget* toolbar_left_group = new QWidget(toolbar);
     toolbar_left_group->setSizePolicy(
         QSizePolicy::Fixed,
         QSizePolicy::Preferred);
     QHBoxLayout* toolbar_left_layout =
         new QHBoxLayout(toolbar_left_group);
     toolbar_left_layout->setContentsMargins(0, 0, 0, 0);
-    toolbar_left_layout->setSpacing(0);
+    toolbar_left_layout->setSpacing(
+        static_cast<int>(TOOLBAR_BUTTON_SPACING));
     toolbar_undo_button =
         ToolbarButton(0xE2A1, toolbar_left_group);
     toolbar_redo_button =
         ToolbarButton(0xE2A0, toolbar_left_group);
+    toolbar_snap_button =
+        ToolbarButton(0xE2B5, toolbar_left_group);
     toolbar_save_button =
         ToolbarButton(0xE14D, toolbar_left_group);
     toolbar_load_button =
@@ -152,16 +159,23 @@ LightTrackPage::LightTrackPage(
         "Load layout (Ctrl+O)");
     toolbar_undo_button->setAccessibleName("Undo");
     toolbar_redo_button->setAccessibleName("Redo");
+    toolbar_snap_button->setObjectName("toolbarSnapButton");
+    toolbar_snap_button->setCheckable(true);
+    toolbar_snap_button->setChecked(true);
+    toolbar_snap_button->setToolTip(
+        "Snap clips to the timeline grid and other clip edges");
+    toolbar_snap_button->setAccessibleName("Timeline snapping");
     toolbar_save_button->setAccessibleName("Save layout");
     toolbar_load_button->setAccessibleName("Load layout");
     toolbar_undo_button->setEnabled(false);
     toolbar_redo_button->setEnabled(false);
     toolbar_left_layout->addWidget(toolbar_undo_button);
     toolbar_left_layout->addWidget(toolbar_redo_button);
+    toolbar_left_layout->addWidget(toolbar_snap_button);
     toolbar_left_layout->addWidget(toolbar_save_button);
     toolbar_left_layout->addWidget(toolbar_load_button);
 
-    toolbar_right_group = new QWidget(toolbar);
+    QWidget* toolbar_right_group = new QWidget(toolbar);
     toolbar_right_group->setSizePolicy(
         QSizePolicy::Fixed,
         QSizePolicy::Preferred);
@@ -185,27 +199,27 @@ LightTrackPage::LightTrackPage(
     toolbar_music_button->setObjectName(
         "toolbarMusicButton");
     toolbar_music_button->setFixedHeight(
-        static_cast<int>(TOOLBAR_HEIGHT));
+        static_cast<int>(TOOLBAR_BUTTON_SIZE));
     toolbar_music_button->setFocusPolicy(Qt::NoFocus);
     toolbar_right_layout->addWidget(toolbar_music_button);
-    toolbar_snap_button =
-        ToolbarButton(0xE2B5, toolbar_right_group);
-    toolbar_snap_button->setObjectName("toolbarSnapButton");
-    toolbar_snap_button->setCheckable(true);
-    toolbar_snap_button->setChecked(true);
-    toolbar_snap_button->setToolTip(
-        "Snap clips to the timeline grid and other clip edges");
-    toolbar_snap_button->setAccessibleName("Timeline snapping");
-    toolbar_right_layout->addWidget(toolbar_snap_button);
-    UpdateToolbarSideWidths();
 
-    toolbar_layout->addWidget(toolbar_left_group);
-    toolbar_layout->addStretch();
+    toolbar_layout->addWidget(
+        toolbar_left_group,
+        0,
+        0,
+        Qt::AlignLeft | Qt::AlignVCenter);
     toolbar_play_button = ToolbarButton(0xE13C, toolbar);
     toolbar_play_button->setEnabled(false);
-    toolbar_layout->addWidget(toolbar_play_button);
-    toolbar_layout->addStretch();
-    toolbar_layout->addWidget(toolbar_right_group);
+    toolbar_layout->addWidget(
+        toolbar_play_button,
+        0,
+        1,
+        Qt::AlignCenter);
+    toolbar_layout->addWidget(
+        toolbar_right_group,
+        0,
+        2,
+        Qt::AlignRight | Qt::AlignVCenter);
 
     QFrame* toolbar_separator = new QFrame(this);
     toolbar_separator->setFrameShape(QFrame::HLine);
@@ -299,6 +313,8 @@ LightTrackPage::LightTrackPage(
 
     content_layout->addWidget(content_splitter, 1);
     page_layout->addWidget(toolbar);
+    page_layout->addSpacing(
+        static_cast<int>(TOOLBAR_SEPARATOR_GAP));
     page_layout->addWidget(toolbar_separator);
     page_layout->addWidget(content, 1);
 
