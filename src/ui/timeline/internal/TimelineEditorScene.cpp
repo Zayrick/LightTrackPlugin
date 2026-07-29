@@ -5,6 +5,8 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QPainter>
 #include <QPen>
+#include <QPushButton>
+#include <QResizeEvent>
 
 #include <algorithm>
 #include <utility>
@@ -1324,6 +1326,57 @@ TimelineRulerWidget::TimelineRulerWidget(QWidget* parent) :
     QWidget(parent)
 {
     setFixedHeight(static_cast<int>(RULER_HEIGHT));
+
+    hide_zero_led_zones_button = new QPushButton(
+        QString(QChar(0xE0BB)),
+        this);
+    hide_zero_led_zones_button->setObjectName(
+        QStringLiteral("hideZeroLedZonesButton"));
+    hide_zero_led_zones_button->setCheckable(true);
+    hide_zero_led_zones_button->setFocusPolicy(Qt::NoFocus);
+    hide_zero_led_zones_button->setToolTip(
+        QStringLiteral("Hide zones with zero LEDs"));
+    hide_zero_led_zones_button->setStyleSheet(R"(
+        QPushButton#hideZeroLedZonesButton {
+            background-color: transparent;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            padding: 0;
+        }
+
+        QPushButton#hideZeroLedZonesButton:hover {
+            background-color: rgba(127, 127, 127, 45);
+        }
+
+        QPushButton#hideZeroLedZonesButton:pressed {
+            background-color: rgba(127, 127, 127, 80);
+        }
+
+        QPushButton#hideZeroLedZonesButton:checked {
+            background-color: rgba(64, 188, 255, 70);
+            border-color: rgba(64, 188, 255, 180);
+        }
+
+        QPushButton#hideZeroLedZonesButton:checked:hover {
+            background-color: rgba(64, 188, 255, 95);
+        }
+    )");
+    QFont icon_font(lighttrack::ui::LucideFontFamily());
+    icon_font.setPixelSize(15);
+    hide_zero_led_zones_button->setFont(icon_font);
+
+    connect(
+        hide_zero_led_zones_button,
+        &QPushButton::toggled,
+        this,
+        [this](bool checked)
+        {
+            if(hide_zero_led_zones_changed_callback)
+            {
+                hide_zero_led_zones_changed_callback(checked);
+            }
+        });
+    UpdateDeviceButtonGeometry();
 }
 
 void TimelineRulerWidget::SetLabelWidth(qreal width)
@@ -1334,6 +1387,7 @@ void TimelineRulerWidget::SetLabelWidth(qreal width)
         return;
     }
     label_width = bounded_width;
+    UpdateDeviceButtonGeometry();
     update();
 }
 
@@ -1368,6 +1422,40 @@ void TimelineRulerWidget::SetScrollOffset(int offset)
     }
     horizontal_offset = offset;
     update();
+}
+
+void TimelineRulerWidget::SetHideZeroLedZonesChangedCallback(
+    std::function<void(bool)> callback)
+{
+    hide_zero_led_zones_changed_callback = std::move(callback);
+}
+
+void TimelineRulerWidget::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    UpdateDeviceButtonGeometry();
+}
+
+void TimelineRulerWidget::UpdateDeviceButtonGeometry()
+{
+    if(hide_zero_led_zones_button == nullptr)
+    {
+        return;
+    }
+
+    constexpr int button_size = 24;
+    constexpr int right_margin = 5;
+    const int visible_label_width = qRound(
+        qMin<qreal>(label_width, width()));
+    hide_zero_led_zones_button->setGeometry(
+        qMax(
+            right_margin,
+            visible_label_width
+                - button_size
+                - right_margin),
+        (height() - button_size) / 2,
+        button_size,
+        button_size);
 }
 
 void TimelineRulerWidget::paintEvent(QPaintEvent*)
@@ -1406,7 +1494,7 @@ void TimelineRulerWidget::paintEvent(QPaintEvent*)
             0.0,
             qMax<qreal>(
                 0.0,
-                visible_label_width - 16.0),
+                visible_label_width - 48.0),
             height()),
         Qt::AlignVCenter | Qt::AlignLeft,
         QStringLiteral("Device"));

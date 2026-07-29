@@ -93,21 +93,21 @@ public:
             &QScrollBar::valueChanged,
             view->verticalScrollBar(),
             &QScrollBar::setValue);
-        QObject::connect(
-            track_splitter,
-            &QSplitter::splitterMoved,
-            editor,
-            [this, track_splitter](int, int)
-            {
-                ruler->SetLabelWidth(
-                    lane_list->width()
-                    + track_splitter->handleWidth());
-            });
-
         lane_list->SetVisibilityChangedCallback(
             [this](const QVector<int>& lane_indices)
             {
                 view->SetVisibleLanes(lane_indices);
+            });
+        lane_list->SetWidthChangedCallback(
+            [this, track_splitter](int width)
+            {
+                ruler->SetLabelWidth(
+                    width + track_splitter->handleWidth());
+            });
+        ruler->SetHideZeroLedZonesChangedCallback(
+            [this](bool hide)
+            {
+                lane_list->SetHideZeroLedZones(hide);
             });
     }
 

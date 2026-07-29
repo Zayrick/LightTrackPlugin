@@ -13,6 +13,7 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPixmap>
+#include <QResizeEvent>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QStyle>
@@ -779,6 +780,7 @@ void LaneListWidget::SetLanes(const QVector<TimelineLane>& lanes)
             0,
             LaneCommittedActionStateRole,
             action_state);
+        item->setData(0, LaneLedCountRole, lane.led_count);
         item->setFlags(Qt::ItemIsEnabled);
         item->setSizeHint(
             0,
@@ -801,6 +803,10 @@ void LaneListWidget::SetLanes(const QVector<TimelineLane>& lanes)
     }
 
     expandAll();
+    for(int i = 0; i < topLevelItemCount(); ++i)
+    {
+        ApplyZeroLedFilter(topLevelItem(i));
+    }
     rebuilding = false;
 }
 
@@ -808,6 +814,16 @@ void LaneListWidget::SetVisibilityChangedCallback(
     std::function<void(const QVector<int>&)> callback)
 {
     visibility_changed_callback = std::move(callback);
+}
+
+void LaneListWidget::SetWidthChangedCallback(
+    std::function<void(int)> callback)
+{
+    width_changed_callback = std::move(callback);
+    if(width_changed_callback)
+    {
+        width_changed_callback(width());
+    }
 }
 
 void LaneListWidget::SetLaneRenamedCallback(
@@ -826,6 +842,21 @@ void LaneListWidget::SetLaneDisabledCallback(
     TimelineEditor::LaneStateChangedCallback callback)
 {
     lane_disabled_callback = std::move(callback);
+}
+
+void LaneListWidget::SetHideZeroLedZones(bool hide)
+{
+    if(hide_zero_led_zones == hide)
+    {
+        return;
+    }
+
+    hide_zero_led_zones = hide;
+    for(int i = 0; i < topLevelItemCount(); ++i)
+    {
+        ApplyZeroLedFilter(topLevelItem(i));
+    }
+    NotifyVisibleLanesChanged();
 }
 
 QVector<int> LaneListWidget::VisibleLaneIndices() const
@@ -860,10 +891,25 @@ void LaneListWidget::drawRow(
     painter->restore();
 }
 
+void LaneListWidget::resizeEvent(QResizeEvent* event)
+{
+    QTreeWidget::resizeEvent(event);
+    if(width_changed_callback
+        && event->size().width() != event->oldSize().width())
+    {
+        width_changed_callback(event->size().width());
+    }
+}
+
 void LaneListWidget::AppendVisibleLaneIndices(
     const QTreeWidgetItem* item,
     QVector<int>& indices) const
 {
+    if(item->isHidden())
+    {
+        return;
+    }
+
     const int lane_index =
         item->data(0, LaneIndexRole).toInt();
     if(lane_index >= 0)
@@ -880,6 +926,32 @@ void LaneListWidget::AppendVisibleLaneIndices(
     {
         AppendVisibleLaneIndices(item->child(i), indices);
     }
+}
+
+bool LaneListWidget::ApplyZeroLedFilter(QTreeWidgetItem* item)
+{
+    if(item == nullptr)
+    {
+        return false;
+    }
+
+    bool has_visible_child = false;
+    for(int i = 0; i < item->childCount(); ++i)
+    {
+        has_visible_child =
+            ApplyZeroLedFilter(item->child(i))
+            || has_visible_child;
+    }
+
+    const int lane_index =
+        item->data(0, LaneIndexRole).toInt();
+    const bool visible =
+        lane_index < 0
+        || (item->childCount() > 0
+            ? has_visible_child
+            : item->data(0, LaneLedCountRole).toInt() > 0);
+    item->setHidden(hide_zero_led_zones && !visible);
+    return !hide_zero_led_zones || visible;
 }
 
 void LaneListWidget::HandleItemChanged(

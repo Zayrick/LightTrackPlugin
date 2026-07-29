@@ -50,6 +50,7 @@ struct TimelineLane
     int level = 0;
     bool highlighted = false;
     bool disabled = false;
+    int led_count = 0;
 };
 
 struct TimelineClip

@@ -36,6 +36,7 @@ class QLabel;
 class QMouseEvent;
 class QPainter;
 class QPaintEvent;
+class QPushButton;
 class QResizeEvent;
 class QScrollBar;
 class QStyleOptionGraphicsItem;
@@ -73,7 +74,8 @@ enum EffectListRole
     LaneIndexRole,
     LaneActionStateRole,
     LaneCommittedNameRole,
-    LaneCommittedActionStateRole
+    LaneCommittedActionStateRole,
+    LaneLedCountRole
 };
 
 struct LaneInfo
@@ -384,15 +386,22 @@ public:
     void SetContentWidth(qreal width);
     void SetPixelsPerSecond(qreal value);
     void SetScrollOffset(int offset);
+    void SetHideZeroLedZonesChangedCallback(
+        std::function<void(bool)> callback);
 
 protected:
     void paintEvent(QPaintEvent*) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
+    void UpdateDeviceButtonGeometry();
     qreal label_width = LABEL_WIDTH;
     qreal content_width = TIMELINE_MIN_WIDTH;
     qreal pixels_per_second = GRID_WIDTH;
     int horizontal_offset = 0;
+    QPushButton* hide_zero_led_zones_button = nullptr;
+    std::function<void(bool)>
+        hide_zero_led_zones_changed_callback;
 };
 
 class LaneListWidget final : public QTreeWidget
@@ -402,12 +411,15 @@ public:
     void SetLanes(const QVector<TimelineLane>& lanes);
     void SetVisibilityChangedCallback(
         std::function<void(const QVector<int>&)> callback);
+    void SetWidthChangedCallback(
+        std::function<void(int)> callback);
     void SetLaneRenamedCallback(
         TimelineEditor::LaneRenamedCallback callback);
     void SetLaneHighlightedCallback(
         TimelineEditor::LaneStateChangedCallback callback);
     void SetLaneDisabledCallback(
         TimelineEditor::LaneStateChangedCallback callback);
+    void SetHideZeroLedZones(bool hide);
     QVector<int> VisibleLaneIndices() const;
 
 protected:
@@ -415,16 +427,20 @@ protected:
         QPainter* painter,
         const QStyleOptionViewItem& option,
         const QModelIndex& index) const override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     void AppendVisibleLaneIndices(
         const QTreeWidgetItem* item,
         QVector<int>& indices) const;
+    bool ApplyZeroLedFilter(QTreeWidgetItem* item);
     void HandleItemChanged(QTreeWidgetItem* item, int column);
     void NotifyVisibleLanesChanged();
     bool rebuilding = false;
+    bool hide_zero_led_zones = false;
     std::function<void(const QVector<int>&)>
         visibility_changed_callback;
+    std::function<void(int)> width_changed_callback;
     TimelineEditor::LaneRenamedCallback lane_renamed_callback;
     TimelineEditor::LaneStateChangedCallback
         lane_highlighted_callback;

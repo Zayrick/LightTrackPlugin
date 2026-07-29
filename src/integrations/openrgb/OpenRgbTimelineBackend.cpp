@@ -124,6 +124,7 @@ struct LaneEntry
     QString state_key;
     bool highlighted = false;
     bool disabled = false;
+    int led_count = 0;
 };
 
 struct LaneState
@@ -208,7 +209,8 @@ public:
                 0,
                 controller,
                 -1,
-                -1);
+                -1,
+                0);
 
             for(int zone_index = 0;
                 zone_index < static_cast<int>(controller->zones.size());
@@ -220,7 +222,8 @@ public:
                     1,
                     controller,
                     zone_index,
-                    -1);
+                    -1,
+                    static_cast<int>(zone_ref.leds_count));
 
                 if(zone_ref.segments.empty())
                 {
@@ -244,7 +247,9 @@ public:
                         2,
                         controller,
                         zone_index,
-                        segment_index);
+                        segment_index,
+                        static_cast<int>(
+                            segment_ref.leds_count));
                     AddRuntimeTarget(
                         segment_lane,
                         controller,
@@ -263,7 +268,8 @@ public:
                 lane.name,
                 lane.level,
                 lane.highlighted,
-                lane.disabled
+                lane.disabled,
+                lane.led_count
             });
         }
         UpdateOverrideTimer();
@@ -923,7 +929,8 @@ private:
         int level,
         RGBController* controller,
         int zone_index,
-        int segment_index)
+        int segment_index,
+        int led_count)
     {
         LaneEntry lane;
         lane.name = native_name;
@@ -931,6 +938,7 @@ private:
         lane.controller = controller;
         lane.zone_index = zone_index;
         lane.segment_index = segment_index;
+        lane.led_count = led_count;
         lane.state_key = LaneStateKey(
             controller,
             zone_index,
