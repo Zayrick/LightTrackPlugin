@@ -20,6 +20,8 @@ public:
     using MusicSeekCallback = std::function<void(qint64)>;
     using ClipSelectedCallback = std::function<void(std::optional<ClipId>)>;
     using ClipRemovedCallback = std::function<void(ClipId)>;
+    using ClipDuplicatedCallback =
+        std::function<void(ClipId, ClipId)>;
     using TimelineChangedCallback = std::function<void()>;
     using LaneRenamedCallback =
         std::function<bool(int, const QString&)>;
@@ -56,6 +58,8 @@ public:
     void SetMusicSeekCallback(MusicSeekCallback callback);
     void SetClipSelectedCallback(ClipSelectedCallback callback);
     void SetClipRemovedCallback(ClipRemovedCallback callback);
+    void SetClipDuplicatedCallback(
+        ClipDuplicatedCallback callback);
     void SetTimelineChangedCallback(TimelineChangedCallback callback);
     void SetLaneRenamedCallback(LaneRenamedCallback callback);
     void SetLaneHighlightedCallback(

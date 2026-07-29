@@ -5,6 +5,7 @@
 #include "../../UiHelpers.h"
 
 #include <QAbstractScrollArea>
+#include <QByteArray>
 #include <QColor>
 #include <QGraphicsItem>
 #include <QGraphicsScene>
@@ -26,6 +27,7 @@ class QDragMoveEvent;
 class QDropEvent;
 class QDragEnterEvent;
 class QDragLeaveEvent;
+class QContextMenuEvent;
 class QEvent;
 class QGraphicsEllipseItem;
 class QGraphicsLineItem;
@@ -48,6 +50,8 @@ class QWheelEvent;
 namespace lighttrack::timeline_internal
 {
 inline constexpr const char* EFFECT_MIME = "application/x-lighttrack-effect";
+inline constexpr const char* CLIP_MIME =
+    "application/x-lighttrack-timeline-clips";
 
 inline constexpr qreal ROW_HEIGHT = 36.0;
 inline constexpr qreal EFFECT_ROW_HEIGHT = 28.0;
@@ -237,6 +241,8 @@ public:
         TimelineEditor::ClipSelectedCallback callback);
     void SetClipRemovedCallback(
         TimelineEditor::ClipRemovedCallback callback);
+    void SetClipDuplicatedCallback(
+        TimelineEditor::ClipDuplicatedCallback callback);
     void SetTimelineChangedCallback(
         TimelineEditor::TimelineChangedCallback callback);
     void ClearTimelineClips();
@@ -255,6 +261,11 @@ public:
     bool PreviewEffectAt(const QString& effect_id, const QPointF& pos);
     bool AddEffectAt(const QString& effect_id, const QPointF& pos);
     void ClearPreview();
+    bool HasSelectedClips() const;
+    bool SelectClipAt(const QPointF& pos);
+    bool CopySelectedClips();
+    bool CanPasteCopiedClips() const;
+    bool PasteCopiedClips();
     bool DeleteSelectedClips();
 
 protected:
@@ -355,7 +366,12 @@ private:
     TimelineEditor::MusicSeekCallback music_seek_callback;
     TimelineEditor::ClipSelectedCallback clip_selected_callback;
     TimelineEditor::ClipRemovedCallback clip_removed_callback;
+    TimelineEditor::ClipDuplicatedCallback
+        clip_duplicated_callback;
     TimelineEditor::TimelineChangedCallback timeline_changed_callback;
+    QString clipboard_source_id;
+    QByteArray last_pasted_clip_data;
+    int paste_sequence = 0;
     qint64 music_duration_ms = 0;
     qint64 music_position_ms = 0;
     qint64 minimum_content_duration_ms = 0;
@@ -492,6 +508,8 @@ public:
         TimelineEditor::ClipSelectedCallback callback);
     void SetClipRemovedCallback(
         TimelineEditor::ClipRemovedCallback callback);
+    void SetClipDuplicatedCallback(
+        TimelineEditor::ClipDuplicatedCallback callback);
     void SetTimelineChangedCallback(
         TimelineEditor::TimelineChangedCallback callback);
     void SetHorizontalZoom(int pixels_per_second);
@@ -499,6 +517,7 @@ public:
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void changeEvent(QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;

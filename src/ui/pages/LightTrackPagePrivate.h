@@ -97,6 +97,9 @@ private:
     void CreateClipSettings(ClipId clip_id);
     void ShowClipSettings(std::optional<ClipId> clip_id);
     void RemoveClipSettings(ClipId clip_id);
+    void DuplicateClipSettings(
+        ClipId source_clip_id,
+        ClipId duplicated_clip_id);
     void ClearAllClipSettings();
 
     void StartRuntime(qint64 position_ms);

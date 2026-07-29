@@ -1,5 +1,7 @@
 #include "TimelineEditorInternal.h"
 
+#include <QAction>
+#include <QContextMenuEvent>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
@@ -7,6 +9,8 @@
 #include <QEvent>
 #include <QFrame>
 #include <QKeyEvent>
+#include <QKeySequence>
+#include <QMenu>
 #include <QMimeData>
 #include <QPropertyAnimation>
 #include <QResizeEvent>
@@ -166,6 +170,12 @@ void LightTrackView::SetClipRemovedCallback(
     light_scene->SetClipRemovedCallback(std::move(callback));
 }
 
+void LightTrackView::SetClipDuplicatedCallback(
+    TimelineEditor::ClipDuplicatedCallback callback)
+{
+    light_scene->SetClipDuplicatedCallback(std::move(callback));
+}
+
 void LightTrackView::SetTimelineChangedCallback(
     TimelineEditor::TimelineChangedCallback callback)
 {
@@ -244,6 +254,18 @@ void LightTrackView::MaybeTurnPlaybackPage(qint64 position_ms)
 
 void LightTrackView::keyPressEvent(QKeyEvent* event)
 {
+    if(event->matches(QKeySequence::Copy)
+        && light_scene->CopySelectedClips())
+    {
+        event->accept();
+        return;
+    }
+    if(event->matches(QKeySequence::Paste)
+        && light_scene->PasteCopiedClips())
+    {
+        event->accept();
+        return;
+    }
     if(event->key() == Qt::Key_Delete
         && light_scene->DeleteSelectedClips())
     {
@@ -251,6 +273,44 @@ void LightTrackView::keyPressEvent(QKeyEvent* event)
         return;
     }
     QGraphicsView::keyPressEvent(event);
+}
+
+void LightTrackView::contextMenuEvent(QContextMenuEvent* event)
+{
+    light_scene->SelectClipAt(mapToScene(event->pos()));
+
+    QMenu menu(this);
+    QAction* copy_action =
+        menu.addAction(QStringLiteral("Copy"));
+    copy_action->setShortcut(QKeySequence::Copy);
+    copy_action->setEnabled(light_scene->HasSelectedClips());
+
+    QAction* paste_action =
+        menu.addAction(QStringLiteral("Paste"));
+    paste_action->setShortcut(QKeySequence::Paste);
+    paste_action->setEnabled(
+        light_scene->CanPasteCopiedClips());
+
+    menu.addSeparator();
+    QAction* delete_action =
+        menu.addAction(QStringLiteral("Delete"));
+    delete_action->setShortcut(QKeySequence::Delete);
+    delete_action->setEnabled(light_scene->HasSelectedClips());
+
+    QAction* selected_action = menu.exec(event->globalPos());
+    if(selected_action == copy_action)
+    {
+        light_scene->CopySelectedClips();
+    }
+    else if(selected_action == paste_action)
+    {
+        light_scene->PasteCopiedClips();
+    }
+    else if(selected_action == delete_action)
+    {
+        light_scene->DeleteSelectedClips();
+    }
+    event->accept();
 }
 
 void LightTrackView::resizeEvent(QResizeEvent* event)

@@ -1,20 +1,176 @@
 #include "TimelineEditorInternal.h"
 
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QGraphicsEllipseItem>
 #include <QGraphicsLineItem>
 #include <QGraphicsSceneMouseEvent>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMimeData>
 #include <QPainter>
 #include <QPen>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QUuid>
 
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <utility>
 
 namespace lighttrack::timeline_internal
 {
+namespace
+{
+constexpr int CLIPBOARD_FORMAT_VERSION = 1;
+constexpr int MAX_CLIPBOARD_CLIPS = 1000;
+
+struct ClipboardClip
+{
+    ClipId source_id;
+    QString effect_id;
+    int lane_index = -1;
+    qint64 start_ms = 0;
+    qint64 end_ms = 0;
+};
+
+struct ClipboardPayload
+{
+    QString source_editor_id;
+    QVector<ClipboardClip> clips;
+};
+
+QByteArray EncodeClipboardPayload(
+    const QString& source_editor_id,
+    const QVector<TimelineClip>& clips)
+{
+    QJsonArray clip_values;
+    for(const TimelineClip& clip : clips)
+    {
+        QJsonObject clip_value;
+        clip_value.insert(
+            QStringLiteral("sourceClipId"),
+            QString::number(clip.id.Value()));
+        clip_value.insert(
+            QStringLiteral("effectId"),
+            clip.effect_id);
+        clip_value.insert(
+            QStringLiteral("laneIndex"),
+            clip.lane_index);
+        clip_value.insert(
+            QStringLiteral("startMs"),
+            QString::number(clip.start_ms));
+        clip_value.insert(
+            QStringLiteral("endMs"),
+            QString::number(clip.end_ms));
+        clip_values.push_back(clip_value);
+    }
+
+    QJsonObject root;
+    root.insert(
+        QStringLiteral("version"),
+        CLIPBOARD_FORMAT_VERSION);
+    root.insert(
+        QStringLiteral("sourceEditorId"),
+        source_editor_id);
+    root.insert(QStringLiteral("clips"), clip_values);
+    return QJsonDocument(root).toJson(QJsonDocument::Compact);
+}
+
+std::optional<ClipboardPayload> DecodeClipboardPayload(
+    const QByteArray& data)
+{
+    QJsonParseError parse_error;
+    const QJsonDocument document =
+        QJsonDocument::fromJson(data, &parse_error);
+    if(parse_error.error != QJsonParseError::NoError
+        || !document.isObject())
+    {
+        return std::nullopt;
+    }
+
+    const QJsonObject root = document.object();
+    if(root.value(QStringLiteral("version")).toInt(-1)
+            != CLIPBOARD_FORMAT_VERSION
+        || !root.value(QStringLiteral("sourceEditorId")).isString()
+        || !root.value(QStringLiteral("clips")).isArray())
+    {
+        return std::nullopt;
+    }
+
+    ClipboardPayload payload;
+    payload.source_editor_id =
+        root.value(QStringLiteral("sourceEditorId")).toString();
+    const QJsonArray clip_values =
+        root.value(QStringLiteral("clips")).toArray();
+    if(payload.source_editor_id.isEmpty()
+        || clip_values.empty()
+        || clip_values.size() > MAX_CLIPBOARD_CLIPS)
+    {
+        return std::nullopt;
+    }
+
+    payload.clips.reserve(clip_values.size());
+    for(const QJsonValue& value : clip_values)
+    {
+        if(!value.isObject())
+        {
+            return std::nullopt;
+        }
+
+        const QJsonObject clip_value = value.toObject();
+        bool source_id_valid = false;
+        bool start_valid = false;
+        bool end_valid = false;
+        const quint64 source_id = clip_value
+            .value(QStringLiteral("sourceClipId"))
+            .toString()
+            .toULongLong(&source_id_valid);
+        const qint64 start_ms = clip_value
+            .value(QStringLiteral("startMs"))
+            .toString()
+            .toLongLong(&start_valid);
+        const qint64 end_ms = clip_value
+            .value(QStringLiteral("endMs"))
+            .toString()
+            .toLongLong(&end_valid);
+        const QString effect_id = clip_value
+            .value(QStringLiteral("effectId"))
+            .toString();
+        const int lane_index = clip_value
+            .value(QStringLiteral("laneIndex"))
+            .toInt(-1);
+
+        if(!source_id_valid
+            || source_id == 0
+            || !start_valid
+            || !end_valid
+            || start_ms < 0
+            || end_ms <= start_ms
+            || effect_id.isEmpty()
+            || lane_index < 0)
+        {
+            return std::nullopt;
+        }
+
+        payload.clips.push_back({
+            ClipId(source_id),
+            effect_id,
+            lane_index,
+            start_ms,
+            end_ms
+        });
+    }
+    return payload;
+}
+}
+
 LightTrackScene::LightTrackScene(QObject* parent) :
-    QGraphicsScene(parent)
+    QGraphicsScene(parent),
+    clipboard_source_id(
+        QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
 }
 
@@ -145,6 +301,12 @@ void LightTrackScene::SetClipRemovedCallback(
     TimelineEditor::ClipRemovedCallback callback)
 {
     clip_removed_callback = std::move(callback);
+}
+
+void LightTrackScene::SetClipDuplicatedCallback(
+    TimelineEditor::ClipDuplicatedCallback callback)
+{
+    clip_duplicated_callback = std::move(callback);
 }
 
 void LightTrackScene::SetTimelineChangedCallback(
@@ -297,6 +459,218 @@ bool LightTrackScene::AddEffectAt(const QString& effect_id, const QPointF& pos)
 void LightTrackScene::ClearPreview()
 {
     HidePreview();
+}
+
+bool LightTrackScene::HasSelectedClips() const
+{
+    return std::any_of(
+        clips.cbegin(),
+        clips.cend(),
+        [](const TimelineClipItem* clip)
+        {
+            return clip->isSelected();
+        });
+}
+
+bool LightTrackScene::SelectClipAt(const QPointF& pos)
+{
+    TimelineClipItem* clip = ClipAt(pos);
+    if(clip == nullptr)
+    {
+        return false;
+    }
+
+    if(!clip->isSelected())
+    {
+        clearSelection();
+        clip->setSelected(true);
+        NotifyClipSelected(clip);
+    }
+    return true;
+}
+
+bool LightTrackScene::CopySelectedClips()
+{
+    const QVector<TimelineClip> snapshots =
+        BuildClipSnapshots(true);
+    QVector<TimelineClip> selected_clips;
+    selected_clips.reserve(clips.size());
+    for(int i = 0; i < clips.size() && i < snapshots.size(); i++)
+    {
+        if(clips[i]->isSelected())
+        {
+            selected_clips.push_back(snapshots[i]);
+        }
+    }
+
+    if(selected_clips.empty())
+    {
+        return false;
+    }
+
+    const QByteArray data = EncodeClipboardPayload(
+        clipboard_source_id,
+        selected_clips);
+    QMimeData* mime_data = new QMimeData();
+    mime_data->setData(CLIP_MIME, data);
+    QGuiApplication::clipboard()->setMimeData(mime_data);
+    last_pasted_clip_data.clear();
+    paste_sequence = 0;
+    return true;
+}
+
+bool LightTrackScene::CanPasteCopiedClips() const
+{
+    const QMimeData* mime_data =
+        QGuiApplication::clipboard()->mimeData();
+    return mime_data != nullptr
+        && mime_data->hasFormat(CLIP_MIME);
+}
+
+bool LightTrackScene::PasteCopiedClips()
+{
+    const QMimeData* mime_data =
+        QGuiApplication::clipboard()->mimeData();
+    if(mime_data == nullptr
+        || !mime_data->hasFormat(CLIP_MIME)
+        || pixels_per_second <= 0.0
+        || lanes.empty())
+    {
+        return false;
+    }
+
+    const QByteArray data = mime_data->data(CLIP_MIME);
+    const std::optional<ClipboardPayload> payload =
+        DecodeClipboardPayload(data);
+    if(!payload.has_value())
+    {
+        return false;
+    }
+
+    if(last_pasted_clip_data != data)
+    {
+        last_pasted_clip_data = data;
+        paste_sequence = 0;
+    }
+
+    const int next_sequence =
+        paste_sequence == std::numeric_limits<int>::max()
+        ? paste_sequence
+        : paste_sequence + 1;
+    const qint64 paste_interval_ms =
+        qMax<qint64>(
+            1,
+            TimelineTickIntervalMs(pixels_per_second));
+    const qint64 maximum_offset =
+        std::numeric_limits<qint64>::max();
+    const qint64 paste_offset_ms =
+        next_sequence > maximum_offset / paste_interval_ms
+        ? maximum_offset
+        : next_sequence * paste_interval_ms;
+    const qint64 maximum_timeline_ms =
+        qMax<qint64>(
+            1,
+            static_cast<qint64>(std::floor(
+                sceneRect().width()
+                * 1000.0
+                / pixels_per_second)));
+
+    struct PendingPaste
+    {
+        ClipId source_id;
+        EffectDescriptor effect;
+        int lane_index = -1;
+        qreal x = 0.0;
+        qreal width = CLIP_DEFAULT_WIDTH;
+    };
+
+    QVector<PendingPaste> pending_clips;
+    pending_clips.reserve(payload->clips.size());
+    for(const ClipboardClip& copied_clip : payload->clips)
+    {
+        const EffectDescriptor* effect =
+            FindEffect(copied_clip.effect_id);
+        const qint64 duration_ms =
+            copied_clip.end_ms - copied_clip.start_ms;
+        if(effect == nullptr
+            || copied_clip.lane_index >= lanes.size()
+            || duration_ms <= 0
+            || duration_ms > maximum_timeline_ms)
+        {
+            continue;
+        }
+
+        const qint64 latest_start_ms =
+            maximum_timeline_ms - duration_ms;
+        const qint64 desired_start_ms =
+            copied_clip.start_ms
+                > maximum_offset - paste_offset_ms
+            ? maximum_offset
+            : copied_clip.start_ms + paste_offset_ms;
+        qint64 start_ms = desired_start_ms;
+        if(start_ms > latest_start_ms)
+        {
+            start_ms =
+                copied_clip.start_ms >= paste_offset_ms
+                ? copied_clip.start_ms - paste_offset_ms
+                : latest_start_ms;
+        }
+        start_ms = qBound<qint64>(0, start_ms, latest_start_ms);
+        pending_clips.push_back({
+            copied_clip.source_id,
+            *effect,
+            copied_clip.lane_index,
+            start_ms * pixels_per_second / 1000.0,
+            qMax(
+                CLIP_MIN_WIDTH,
+                duration_ms * pixels_per_second / 1000.0)
+        });
+    }
+
+    if(pending_clips.empty())
+    {
+        return false;
+    }
+
+    CancelDrag();
+    clearSelection();
+    const bool same_editor =
+        payload->source_editor_id == clipboard_source_id;
+    TimelineClipItem* last_added_clip = nullptr;
+    for(const PendingPaste& pending : pending_clips)
+    {
+        TimelineClipItem* clip = AddClip(
+            pending.effect,
+            pending.lane_index,
+            pending.x,
+            pending.width,
+            false,
+            false,
+            {});
+        if(clip == nullptr)
+        {
+            continue;
+        }
+
+        clip->setSelected(true);
+        last_added_clip = clip;
+        if(same_editor && clip_duplicated_callback)
+        {
+            clip_duplicated_callback(
+                pending.source_id,
+                clip->Id());
+        }
+    }
+
+    if(last_added_clip == nullptr)
+    {
+        return false;
+    }
+
+    paste_sequence = next_sequence;
+    NotifyClipSelected(last_added_clip);
+    NotifyTimelineChanged();
+    return true;
 }
 
 bool LightTrackScene::DeleteSelectedClips()

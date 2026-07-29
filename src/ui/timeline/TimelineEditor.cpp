@@ -238,6 +238,12 @@ void TimelineEditor::SetClipRemovedCallback(
     d->view->SetClipRemovedCallback(std::move(callback));
 }
 
+void TimelineEditor::SetClipDuplicatedCallback(
+    ClipDuplicatedCallback callback)
+{
+    d->view->SetClipDuplicatedCallback(std::move(callback));
+}
+
 void TimelineEditor::SetTimelineChangedCallback(
     TimelineChangedCallback callback)
 {

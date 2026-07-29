@@ -45,3 +45,35 @@ add_test(
     -P
     ${CMAKE_CURRENT_SOURCE_DIR}/ArchitectureBoundaries.cmake
 )
+
+add_executable(lighttrack_timeline_tests
+  TimelineClipboardTests.cpp
+)
+
+target_link_libraries(lighttrack_timeline_tests PRIVATE
+  lighttrack_timeline
+  Qt${QT_VERSION_MAJOR}::Widgets
+)
+
+if(WIN32)
+  add_test(
+    NAME lighttrack_timeline.clipboard
+    COMMAND
+      ${CMAKE_COMMAND}
+      -E
+      env
+      "QT_QPA_PLATFORM=offscreen"
+      "PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Widgets>;$ENV{PATH}"
+      $<TARGET_FILE:lighttrack_timeline_tests>
+  )
+else()
+  add_test(
+    NAME lighttrack_timeline.clipboard
+    COMMAND
+      ${CMAKE_COMMAND}
+      -E
+      env
+      "QT_QPA_PLATFORM=offscreen"
+      $<TARGET_FILE:lighttrack_timeline_tests>
+  )
+endif()

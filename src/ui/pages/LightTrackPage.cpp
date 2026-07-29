@@ -250,6 +250,13 @@ LightTrackPage::LightTrackPage(
         {
             RemoveClipSettings(clip_id);
         });
+    timeline_editor->SetClipDuplicatedCallback(
+        [this](ClipId source_clip_id, ClipId duplicated_clip_id)
+        {
+            DuplicateClipSettings(
+                source_clip_id,
+                duplicated_clip_id);
+        });
     timeline_editor->SetTimelineChangedCallback([this]()
     {
         UpdateMinimumTimelineDuration();

@@ -21,6 +21,8 @@
 #include <QTextEdit>
 #include <QTimer>
 
+#include <utility>
+
 namespace lighttrack::ui
 {
 bool LightTrackPage::eventFilter(
@@ -295,6 +297,66 @@ void LightTrackPage::RemoveClipSettings(ClipId clip_id)
     settings_stack->removeWidget(settings_widget);
     delete settings_widget;
     clip_settings.erase(settings);
+}
+
+void LightTrackPage::DuplicateClipSettings(
+    ClipId source_clip_id,
+    ClipId duplicated_clip_id)
+{
+    if(backend == nullptr
+        || !source_clip_id.IsValid()
+        || !duplicated_clip_id.IsValid())
+    {
+        return;
+    }
+
+    const std::optional<TimelineClip> source_clip =
+        timeline_editor->FindClip(source_clip_id);
+    const std::optional<TimelineClip> duplicated_clip =
+        timeline_editor->FindClip(duplicated_clip_id);
+    if(!source_clip.has_value()
+        || !duplicated_clip.has_value()
+        || source_clip->effect_id != duplicated_clip->effect_id)
+    {
+        return;
+    }
+
+    try
+    {
+        QString error;
+        if(!backend->EnsureEffect(
+            source_clip_id,
+            source_clip->effect_id,
+            &error))
+        {
+            return;
+        }
+
+        const QByteArray settings =
+            backend->ExportClipSettings(source_clip_id);
+        TimelineBackend::EffectPtr duplicated_effect =
+            backend->CreateEffect(
+                duplicated_clip->effect_id,
+                &error);
+        if(duplicated_effect == nullptr
+            || !backend->ImportEffectSettings(
+                *duplicated_effect,
+                settings,
+                &error))
+        {
+            return;
+        }
+
+        backend->AttachEffect(
+            duplicated_clip_id,
+            std::move(duplicated_effect),
+            &error);
+    }
+    catch(...)
+    {
+        // The normal timeline-change path will create a default effect
+        // instance if the source settings cannot be copied.
+    }
 }
 
 void LightTrackPage::ClearAllClipSettings()
