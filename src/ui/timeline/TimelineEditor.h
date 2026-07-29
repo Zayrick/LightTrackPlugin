@@ -35,7 +35,9 @@ public:
     void SetEffects(const QVector<EffectGroup>& groups);
     void SetLanes(const QVector<TimelineLane>& lanes, const QString& empty_text = {});
     void SetMusicSpectrum(const QVector<qreal>& spectrum, qint64 duration_ms);
-    void SetMusicPosition(qint64 position_ms);
+    void SetMusicPosition(
+        qint64 position_ms,
+        bool turn_page = false);
     void SetMinimumTimelineDuration(qint64 duration_ms);
     void SetHorizontalZoom(int pixels_per_second);
     void SetSnappingEnabled(bool enabled);

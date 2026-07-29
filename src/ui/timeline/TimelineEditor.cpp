@@ -148,9 +148,11 @@ void TimelineEditor::SetMusicSpectrum(
     d->view->SetMusicSpectrum(spectrum, duration_ms);
 }
 
-void TimelineEditor::SetMusicPosition(qint64 position_ms)
+void TimelineEditor::SetMusicPosition(
+    qint64 position_ms,
+    bool turn_page)
 {
-    d->view->SetMusicPosition(position_ms);
+    d->view->SetMusicPosition(position_ms, turn_page);
 }
 
 void TimelineEditor::SetMinimumTimelineDuration(qint64 duration_ms)

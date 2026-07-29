@@ -226,7 +226,7 @@ void LightTrackPage::UpdateMusicPosition()
         return;
     }
 
-    timeline_editor->SetMusicPosition(position);
+    timeline_editor->SetMusicPosition(position, music_playing);
     if(music_playing)
     {
         SyncRuntime(position);

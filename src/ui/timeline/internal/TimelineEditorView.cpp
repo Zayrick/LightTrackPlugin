@@ -8,6 +8,7 @@
 #include <QFrame>
 #include <QKeyEvent>
 #include <QMimeData>
+#include <QPropertyAnimation>
 #include <QResizeEvent>
 #include <QScrollBar>
 
@@ -37,6 +38,13 @@ LightTrackView::LightTrackView(QWidget* parent) :
 
     new OverlayScrollBar(this, Qt::Horizontal);
     new OverlayScrollBar(this, Qt::Vertical);
+
+    page_turn_animation = new QPropertyAnimation(
+        horizontalScrollBar(),
+        "value",
+        this);
+    page_turn_animation->setDuration(PAGE_TURN_DURATION_MS);
+    page_turn_animation->setEasingCurve(QEasingCurve::InOutCubic);
 
     connect(
         horizontalScrollBar(),
@@ -84,9 +92,24 @@ void LightTrackView::SetMusicSpectrum(
     SyncRuler();
 }
 
-void LightTrackView::SetMusicPosition(qint64 position_ms)
+void LightTrackView::SetMusicPosition(
+    qint64 position_ms,
+    bool turn_page)
 {
     light_scene->SetMusicPosition(position_ms);
+
+    if(position_ms <= 0)
+    {
+        page_turn_animation->stop();
+        horizontalScrollBar()->setValue(
+            horizontalScrollBar()->minimum());
+        return;
+    }
+
+    if(turn_page)
+    {
+        MaybeTurnPlaybackPage(position_ms);
+    }
 }
 
 void LightTrackView::SetMinimumTimelineDuration(qint64 duration_ms)
@@ -156,6 +179,7 @@ void LightTrackView::SetSnappingEnabled(bool enabled)
 
 void LightTrackView::SetHorizontalZoom(int pixels_per_second)
 {
+    page_turn_animation->stop();
     const QPoint anchor = viewport()->rect().center();
     const qreal old_scene_x = mapToScene(anchor).x();
     const qreal old_pixels_per_second =
@@ -172,6 +196,50 @@ void LightTrackView::SetHorizontalZoom(int pixels_per_second)
             * light_scene->PixelsPerSecond()
             / old_pixels_per_second
         - anchor.x()));
+}
+
+void LightTrackView::MaybeTurnPlaybackPage(qint64 position_ms)
+{
+    QScrollBar* scroll_bar = horizontalScrollBar();
+    if(page_turn_animation->state() == QAbstractAnimation::Running
+        || scroll_bar->maximum() <= scroll_bar->minimum())
+    {
+        return;
+    }
+
+    const int viewport_width = viewport()->width();
+    if(viewport_width <= 0)
+    {
+        return;
+    }
+
+    const qreal playhead_scene_x = qBound<qreal>(
+        0.0,
+        position_ms * light_scene->PixelsPerSecond() / 1000.0,
+        light_scene->ContentWidth());
+    const qreal playhead_view_x =
+        mapFromScene(QPointF(playhead_scene_x, 0.0)).x();
+    if(playhead_view_x
+        < viewport_width * PAGE_TURN_TRIGGER_RATIO)
+    {
+        return;
+    }
+
+    const int current_value = scroll_bar->value();
+    const int target_value = qBound(
+        scroll_bar->minimum(),
+        current_value + qRound(
+            playhead_view_x
+            - viewport_width * PAGE_TURN_LANDING_RATIO),
+        scroll_bar->maximum());
+    if(target_value <= current_value)
+    {
+        return;
+    }
+
+    page_turn_animation->setStartValue(current_value);
+    page_turn_animation->setEndValue(target_value);
+    page_turn_animation->start();
 }
 
 void LightTrackView::keyPressEvent(QKeyEvent* event)

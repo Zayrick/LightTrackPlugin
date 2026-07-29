@@ -36,6 +36,7 @@ class QLabel;
 class QMouseEvent;
 class QPainter;
 class QPaintEvent;
+class QPropertyAnimation;
 class QPushButton;
 class QResizeEvent;
 class QScrollBar;
@@ -474,7 +475,7 @@ public:
     void SetMusicSpectrum(
         const QVector<qreal>& spectrum,
         qint64 duration_ms);
-    void SetMusicPosition(qint64 position_ms);
+    void SetMusicPosition(qint64 position_ms, bool turn_page);
     void SetMinimumTimelineDuration(qint64 duration_ms);
     QVector<TimelineClip> TimelineClips() const;
     QVector<TimelineClip> PersistentTimelineClips() const;
@@ -506,8 +507,13 @@ protected:
     void dropEvent(QDropEvent* event) override;
 
 private:
+    static constexpr qreal PAGE_TURN_TRIGGER_RATIO = 0.84;
+    static constexpr qreal PAGE_TURN_LANDING_RATIO = 0.14;
+    static constexpr int PAGE_TURN_DURATION_MS = 360;
+    void MaybeTurnPlaybackPage(qint64 position_ms);
     void SyncRuler();
     LightTrackScene* light_scene;
     TimelineRulerWidget* ruler = nullptr;
+    QPropertyAnimation* page_turn_animation = nullptr;
 };
 }
