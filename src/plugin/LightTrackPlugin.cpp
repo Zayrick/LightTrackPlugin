@@ -73,8 +73,6 @@ QWidget* LightTrackPlugin::GetWidget()
     {
         resource_manager->RegisterDeviceListChangeCallback(
             DeviceListChangedCallback, this);
-        resource_manager->RegisterDetectionProgressCallback(
-            DeviceListChangedCallback, this);
         callbacks_registered = true;
     }
 
@@ -92,8 +90,6 @@ void LightTrackPlugin::Unload()
         && callbacks_registered)
     {
         resource_manager->UnregisterDeviceListChangeCallback(
-            DeviceListChangedCallback, this);
-        resource_manager->UnregisterDetectionProgressCallback(
             DeviceListChangedCallback, this);
     }
     callbacks_registered = false;

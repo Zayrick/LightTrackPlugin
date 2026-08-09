@@ -57,7 +57,6 @@ void LightTrackPage::ReloadDevices()
         restore_layout = true;
     }
 
-    StopRuntime();
     const TimelineBackend::DeviceSnapshot devices =
         backend != nullptr
         ? backend->ReloadDevices()

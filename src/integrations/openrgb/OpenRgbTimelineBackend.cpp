@@ -170,10 +170,11 @@ public:
 
     TimelineBackend::DeviceSnapshot ReloadDevices()
     {
-        override_timer_.stop();
-        StopRuntime();
-        SendBlackToTargets(AllRuntimeZones(), true);
-        override_timer_.stop();
+        // OpenRGB deletes hardware controllers before publishing the refreshed
+        // device list.  At this point every cached ControllerZone may therefore
+        // contain a dangling controller pointer.  Detach effects and discard
+        // the cached targets without trying to write a final frame to them.
+        DiscardRuntimeForDeviceReload();
         runtime_targets_.clear();
         runtime_zones_.clear();
         lanes_.clear();
@@ -779,6 +780,20 @@ public:
     }
 
 private:
+    void DiscardRuntimeForDeviceReload()
+    {
+        override_timer_.stop();
+
+        for(auto& entry : clip_effects_)
+        {
+            DeactivateEffect(entry.second.get());
+        }
+
+        runtime_assignments_.clear();
+        last_clips_.clear();
+        runtime_running_ = false;
+    }
+
     static void SetError(QString* destination, const QString& value)
     {
         if(destination != nullptr)
