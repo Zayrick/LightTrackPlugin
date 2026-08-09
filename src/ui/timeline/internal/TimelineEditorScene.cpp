@@ -759,17 +759,22 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
         return;
     }
 
-    if(IsPlayheadHandle(event->scenePos()))
+    const QPointF scene_pos = event->scenePos();
+    const bool is_music_row =
+        music_duration_ms > 0
+        && scene_pos.y() >= 0.0
+        && scene_pos.y() < ROW_HEIGHT;
+    if(IsPlayheadHandle(scene_pos) || is_music_row)
     {
         clearSelection();
         NotifyClipSelected(nullptr);
         drag_mode = PlayheadSeek;
-        SeekMusicAt(event->scenePos().x());
+        SeekMusicAt(scene_pos.x());
         event->accept();
         return;
     }
 
-    TimelineClipItem* clip = ClipAt(event->scenePos());
+    TimelineClipItem* clip = ClipAt(scene_pos);
     if(clip == nullptr)
     {
         clearSelection();
@@ -779,7 +784,7 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
     }
 
     const QPointF local_pos =
-        clip->mapFromScene(event->scenePos());
+        clip->mapFromScene(scene_pos);
     clearSelection();
     clip->setSelected(true);
     NotifyClipSelected(clip);
@@ -799,7 +804,7 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
     }
 
     drag_offset = local_pos;
-    drag_scene_start = event->scenePos();
+    drag_scene_start = scene_pos;
     clip_start_x = clip->pos().x();
     clip_start_width = clip->ClipWidth();
     clip_start_lane = clip->LaneIndex();
@@ -808,11 +813,11 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
 
     if(drag_mode == ClipMove)
     {
-        UpdateClipMove(event->scenePos());
+        UpdateClipMove(scene_pos);
     }
     else
     {
-        UpdateClipResize(event->scenePos());
+        UpdateClipResize(scene_pos);
     }
 
     event->accept();

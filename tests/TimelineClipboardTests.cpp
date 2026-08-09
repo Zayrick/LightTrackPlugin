@@ -2,6 +2,8 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QCoreApplication>
+#include <QGraphicsSceneMouseEvent>
 #include <QGuiApplication>
 #include <QMimeData>
 
@@ -111,6 +113,69 @@ int main(int argc, char** argv)
     CHECK(duplicated_ids.size() == 2);
     CHECK(duplicated_ids[1].first == second_paste[0].id);
     CHECK(duplicated_ids[1].second == second_paste[2].id);
+
+    scene.SetMusicSpectrum({}, 5000);
+    CHECK(scene.SetPixelsPerSecond(100.0));
+
+    QVector<qint64> seek_positions;
+    scene.SetMusicSeekCallback(
+        [&seek_positions](qint64 position_ms)
+        {
+            seek_positions.push_back(position_ms);
+        });
+
+    const auto send_mouse_event =
+        [&scene](
+            QEvent::Type type,
+            const QPointF& position,
+            Qt::MouseButton button,
+            Qt::MouseButtons buttons)
+        {
+            QGraphicsSceneMouseEvent event(type);
+            event.setScenePos(position);
+            event.setPos(position);
+            event.setButton(button);
+            event.setButtons(buttons);
+            QCoreApplication::sendEvent(&scene, &event);
+        };
+
+    send_mouse_event(
+        QEvent::GraphicsSceneMousePress,
+        QPointF(250.0, ROW_HEIGHT / 2.0),
+        Qt::LeftButton,
+        Qt::LeftButton);
+    send_mouse_event(
+        QEvent::GraphicsSceneMouseRelease,
+        QPointF(250.0, ROW_HEIGHT / 2.0),
+        Qt::LeftButton,
+        Qt::NoButton);
+    CHECK(seek_positions.size() == 1);
+    CHECK(seek_positions[0] == 2500);
+
+    send_mouse_event(
+        QEvent::GraphicsSceneMousePress,
+        QPointF(800.0, ROW_HEIGHT / 2.0),
+        Qt::LeftButton,
+        Qt::LeftButton);
+    send_mouse_event(
+        QEvent::GraphicsSceneMouseRelease,
+        QPointF(800.0, ROW_HEIGHT / 2.0),
+        Qt::LeftButton,
+        Qt::NoButton);
+    CHECK(seek_positions.size() == 2);
+    CHECK(seek_positions[1] == 5000);
+
+    send_mouse_event(
+        QEvent::GraphicsSceneMousePress,
+        QPointF(800.0, ROW_HEIGHT + ROW_HEIGHT / 2.0),
+        Qt::LeftButton,
+        Qt::LeftButton);
+    send_mouse_event(
+        QEvent::GraphicsSceneMouseRelease,
+        QPointF(800.0, ROW_HEIGHT + ROW_HEIGHT / 2.0),
+        Qt::LeftButton,
+        Qt::NoButton);
+    CHECK(seek_positions.size() == 2);
 
 #undef CHECK
     return 0;
