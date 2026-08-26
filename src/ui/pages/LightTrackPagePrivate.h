@@ -112,7 +112,9 @@ private:
         qint64 expected_duration_ms);
     void ChooseMusic();
     bool OpenMusic(const QString& path);
-    void ToggleMusicPlayback();
+    void PlayMusic();
+    void PauseMusic();
+    void StopMusic();
     void SeekMusic(qint64 position_ms);
     void UpdateMusicPosition();
     qint64 MusicPositionMs() const;
@@ -134,6 +136,8 @@ private:
     QPushButton* toolbar_load_button = nullptr;
     QPushButton* toolbar_music_button = nullptr;
     QPushButton* toolbar_play_button = nullptr;
+    QPushButton* toolbar_pause_button = nullptr;
+    QPushButton* toolbar_stop_button = nullptr;
     QPushButton* toolbar_snap_button = nullptr;
     QTimer* music_timer = nullptr;
     QTimer* history_commit_timer = nullptr;

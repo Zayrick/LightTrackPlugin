@@ -187,10 +187,35 @@ LightTrackPage::LightTrackPage(
         0,
         0,
         Qt::AlignLeft | Qt::AlignVCenter);
-    toolbar_play_button = ToolbarButton(0xE13C, toolbar);
+    QWidget* toolbar_playback_group = new QWidget(toolbar);
+    toolbar_playback_group->setSizePolicy(
+        QSizePolicy::Fixed,
+        QSizePolicy::Preferred);
+    QHBoxLayout* toolbar_playback_layout =
+        new QHBoxLayout(toolbar_playback_group);
+    toolbar_playback_layout->setContentsMargins(0, 0, 0, 0);
+    toolbar_playback_layout->setSpacing(
+        static_cast<int>(TOOLBAR_BUTTON_SPACING));
+    toolbar_play_button =
+        ToolbarButton(0xE13C, toolbar_playback_group);
+    toolbar_pause_button =
+        ToolbarButton(0xE12E, toolbar_playback_group);
+    toolbar_stop_button =
+        ToolbarButton(0xE167, toolbar_playback_group);
+    toolbar_play_button->setToolTip("Play");
+    toolbar_pause_button->setToolTip("Pause");
+    toolbar_stop_button->setToolTip("Stop");
+    toolbar_play_button->setAccessibleName("Play");
+    toolbar_pause_button->setAccessibleName("Pause");
+    toolbar_stop_button->setAccessibleName("Stop");
     toolbar_play_button->setEnabled(false);
+    toolbar_pause_button->setEnabled(false);
+    toolbar_stop_button->setEnabled(false);
+    toolbar_playback_layout->addWidget(toolbar_play_button);
+    toolbar_playback_layout->addWidget(toolbar_pause_button);
+    toolbar_playback_layout->addWidget(toolbar_stop_button);
     toolbar_layout->addWidget(
-        toolbar_play_button,
+        toolbar_playback_group,
         0,
         1,
         Qt::AlignCenter);
@@ -355,7 +380,17 @@ LightTrackPage::LightTrackPage(
         toolbar_play_button,
         &QPushButton::clicked,
         this,
-        [this]() { ToggleMusicPlayback(); });
+        [this]() { PlayMusic(); });
+    connect(
+        toolbar_pause_button,
+        &QPushButton::clicked,
+        this,
+        [this]() { PauseMusic(); });
+    connect(
+        toolbar_stop_button,
+        &QPushButton::clicked,
+        this,
+        [this]() { StopMusic(); });
     connect(
         toolbar_snap_button,
         &QPushButton::toggled,

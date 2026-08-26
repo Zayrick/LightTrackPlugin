@@ -141,20 +141,10 @@ bool LightTrackPage::OpenMusic(const QString& path)
     return true;
 }
 
-void LightTrackPage::ToggleMusicPlayback()
+void LightTrackPage::PlayMusic()
 {
-    if(!music_loaded)
+    if(!music_loaded || music_playing)
     {
-        return;
-    }
-
-    if(music_playing)
-    {
-        audio_service->Pause();
-        music_timer->stop();
-        music_playing = false;
-        SetPlaybackControls(true, false);
-        UpdateMusicPosition();
         return;
     }
 
@@ -175,6 +165,41 @@ void LightTrackPage::ToggleMusicPlayback()
     music_playing = true;
     SetPlaybackControls(true, true);
     StartRuntime(MusicPositionMs());
+}
+
+void LightTrackPage::PauseMusic()
+{
+    if(!music_loaded || !music_playing)
+    {
+        return;
+    }
+
+    audio_service->Pause();
+    music_timer->stop();
+    music_playing = false;
+    SetPlaybackControls(true, false);
+    UpdateMusicPosition();
+}
+
+void LightTrackPage::StopMusic()
+{
+    if(!music_loaded)
+    {
+        return;
+    }
+
+    music_timer->stop();
+    audio_service->Pause();
+    if(!audio_service->Seek(0))
+    {
+        MarkMusicError();
+        return;
+    }
+
+    music_playing = false;
+    SetPlaybackControls(true, false);
+    timeline_editor->SetMusicPosition(0);
+    StopRuntime();
 }
 
 void LightTrackPage::SeekMusic(qint64 position_ms)
@@ -320,11 +345,15 @@ void LightTrackPage::SetPlaybackControls(
 {
     if(toolbar_play_button != nullptr)
     {
-        const ushort codepoint =
-            playing ? 0xE12E : 0xE13C;
-        toolbar_play_button->setEnabled(enabled);
-        toolbar_play_button->setText(
-            QString(QChar(codepoint)));
+        toolbar_play_button->setEnabled(enabled && !playing);
+    }
+    if(toolbar_pause_button != nullptr)
+    {
+        toolbar_pause_button->setEnabled(enabled && playing);
+    }
+    if(toolbar_stop_button != nullptr)
+    {
+        toolbar_stop_button->setEnabled(enabled);
     }
 }
 }
