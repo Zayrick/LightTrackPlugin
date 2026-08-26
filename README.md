@@ -2,8 +2,6 @@
 
 LightTrackPlugin 是一个基于 Qt 的 OpenRGB 插件，用时间线组织灯光效果，并提供布局持久化、音频播放与波形预览等能力。项目以 C++17 编写，同时支持 Qt 5 和 Qt 6。
 
-更详细的分层约束与扩展原则见 [架构说明](docs/architecture.md)。
-
 ## 获取源码
 
 项目通过 Git 子模块引用 OpenRGB、OpenRGBEffectsPlugin 和 miniaudio。首次克隆时应同时初始化子模块：
@@ -72,44 +70,30 @@ cmake --build build/qt6 --config Debug
 
 Qt 5 的构建方式相同，只需将 `CMAKE_PREFIX_PATH` 指向对应的 Qt 5 安装目录。生成的插件库位于所选构建目录下，具体子目录由 CMake 生成器和构建配置决定。
 
-## 目录职责
+## 源码目录
 
 ```text
 src/
-  plugin/          OpenRGB 插件入口与对象装配
-  application/     UI 使用的稳定端口，不包含具体第三方实现
-  core/            时间线 DTO、标识和值语义逻辑
-  ui/              页面、时间线 facade 及其私有场景/图元/面板实现
-  infrastructure/  布局文件 I/O 与 JSON 编解码实现
-  integrations/    OpenRGB、OpenRGBEffects 和 miniaudio 适配器
-cmake/             模块目标与第三方 Effects 构建配置
-tests/             核心、持久化及架构边界测试
+  plugin/          OpenRGB 插件入口
+  core/            时间线和布局数据
+  ui/              页面及时间线控件
+  infrastructure/  布局文件读写
+  integrations/    OpenRGB 和音频实现
+cmake/             OpenRGB Effects 源码配置
+tests/             功能回归测试
 deps/              Git 子模块，不承载项目业务代码
 resource/          Qt 资源文件使用的静态资源
-docs/              架构与开发说明
 ```
-
-根目录只保留 CMake 入口、Preset、Git 子模块配置和插件资源入口。新增代码应放入职责明确的子目录，不再把界面、硬件控制、音频和持久化逻辑集中到插件入口文件。
-
-构建也按相同边界拆分：
-
-- `lighttrack_core`、`lighttrack_application`：值类型和应用端口。
-- `lighttrack_timeline`、`lighttrack_page`：纯项目 UI。
-- `lighttrack_audio`、`lighttrack_persistence`：可替换的本地实现。
-- `lighttrack_openrgb`：OpenRGB Effects 的 OBJECT 目标，确保所有效果注册器都进入插件。
-- `LightTrackPlugin`：只包含宿主入口、对象装配和项目资源。
 
 ## 开发约定
 
-- 依赖方向应指向 `core`，不能让核心模型反向依赖界面或第三方 SDK。
-- UI 只依赖 `application` 端口与 core DTO；外部层通过 `ClipId`、值对象和接口传递数据。
-- OpenRGB、OpenRGBEffectsPlugin 和 miniaudio 类型只出现在 integrations 实现；JSON 类型只出现在持久化 `.cpp`，都不会泄漏到公共头或 UI。
 - 构建产物统一放入 `build/`，不要提交生成文件。
-- 修改目录或新增源文件时，同步更新 CMake 源文件清单和相关资源路径。
+- 新增或删除源文件时同步更新 `CMakeLists.txt`。
 
-运行不依赖 OpenRGB 宿主的全部测试：
+测试默认不参与普通构建。需要运行时显式开启：
 
 ```sh
+cmake --preset qt5-release -D BUILD_TESTING=ON
 cmake --build --preset qt5-release
 ctest --test-dir build/qt5-release -C Release --output-on-failure
 ```

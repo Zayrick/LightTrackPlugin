@@ -2,6 +2,9 @@
 
 #include "core/LayoutSnapshot.h"
 #include "core/SnapshotHistory.h"
+#include "infrastructure/persistence/LayoutFileRepository.h"
+#include "integrations/audio/MiniaudioAudioService.h"
+#include "integrations/openrgb/OpenRgbTimelineBackend.h"
 #include "ui/timeline/TimelineMetrics.h"
 
 #include <QVector>
@@ -9,7 +12,6 @@
 #include <QStringList>
 
 #include <map>
-#include <memory>
 #include <optional>
 
 class QLabel;
@@ -20,11 +22,10 @@ class QTimer;
 
 namespace lighttrack
 {
-class AudioService;
-class LayoutRepository;
-class TimelineBackend;
 class TimelineEditor;
 }
+
+class ResourceManagerInterface;
 
 namespace lighttrack::ui::page_detail
 {
@@ -55,9 +56,7 @@ class LightTrackPage final : public QWidget
 {
 public:
     LightTrackPage(
-        std::unique_ptr<TimelineBackend> backend,
-        std::unique_ptr<AudioService> audio_service,
-        std::unique_ptr<LayoutRepository> layout_repository,
+        ResourceManagerInterface* resource_manager,
         QWidget* parent = nullptr);
     ~LightTrackPage() override;
 
@@ -85,12 +84,12 @@ private:
 
     LayoutSnapshot CaptureLayoutState();
     bool TryCaptureLayoutState(
-        LayoutSnapshot* snapshot,
-        QString* error);
+        LayoutSnapshot& snapshot,
+        QString& error);
     bool ApplyLayoutState(
         const LayoutSnapshot& layout,
-        QString* error,
-        QStringList* warnings);
+        QString& error,
+        QStringList& warnings);
     void SaveLayout();
     void LoadLayout();
 
@@ -124,9 +123,9 @@ private:
 
     void SetPlaybackControls(bool enabled, bool playing);
 
-    std::unique_ptr<TimelineBackend> backend;
-    std::unique_ptr<AudioService> audio_service;
-    std::unique_ptr<LayoutRepository> layout_repository;
+    openrgb::OpenRgbTimelineBackend backend;
+    audio::MiniaudioAudioService audio_service;
+    persistence::LayoutFileRepository layout_repository;
     TimelineEditor* timeline_editor = nullptr;
     QStackedWidget* settings_stack = nullptr;
     QLabel* settings_placeholder = nullptr;

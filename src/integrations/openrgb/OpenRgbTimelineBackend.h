@@ -1,82 +1,116 @@
 #pragma once
 
-#include "application/TimelineBackend.h"
+#include "core/TimelineTypes.h"
+#include "core/effects/EffectDescriptor.h"
+
+#include <QByteArray>
+#include <QString>
+#include <QVector>
 
 #include <memory>
+#include <vector>
 
 class ResourceManagerInterface;
+class RGBEffect;
+class QWidget;
 
 namespace lighttrack::openrgb
 {
-class OpenRgbTimelineBackend final : public TimelineBackend
+class OpenRgbTimelineBackend
 {
 public:
+    class Effect
+    {
+    public:
+        explicit Effect(std::unique_ptr<RGBEffect> value);
+        ~Effect();
+
+        Effect(const Effect&) = delete;
+        Effect& operator=(const Effect&) = delete;
+
+        RGBEffect* Get() const noexcept;
+
+    private:
+        std::unique_ptr<RGBEffect> value_;
+    };
+
+    using EffectPtr = std::unique_ptr<Effect>;
+
+    struct ClipEffect
+    {
+        ClipId clip_id;
+        EffectPtr effect;
+    };
+
+    struct DeviceSnapshot
+    {
+        QVector<TimelineLane> lanes;
+        QString empty_message;
+    };
+
     explicit OpenRgbTimelineBackend(ResourceManagerInterface* resource_manager);
-    ~OpenRgbTimelineBackend() override;
+    ~OpenRgbTimelineBackend();
 
     OpenRgbTimelineBackend(const OpenRgbTimelineBackend&) = delete;
     OpenRgbTimelineBackend& operator=(const OpenRgbTimelineBackend&) = delete;
 
-    QVector<EffectGroup> Effects() const override;
+    QVector<EffectGroup> Effects() const;
     bool FindEffect(
         const QString& effect_id,
-        EffectDescriptor* descriptor = nullptr) const override;
+        EffectDescriptor& descriptor) const;
 
-    DeviceSnapshot ReloadDevices() override;
-    QByteArray SerializeLane(int lane_index) const override;
-    int ResolveLane(const QByteArray& serialized_lane) const override;
+    DeviceSnapshot ReloadDevices();
+    QByteArray SerializeLane(int lane_index) const;
+    int ResolveLane(const QByteArray& serialized_lane) const;
     bool RenameLane(
         int lane_index,
-        const QString& name) override;
+        const QString& name);
     bool SetLaneHighlighted(
         int lane_index,
-        bool highlighted) override;
+        bool highlighted);
     bool SetLaneDisabled(
         int lane_index,
-        bool disabled) override;
-    void PrepareForDeviceReload() override;
+        bool disabled);
+    void PrepareForDeviceReload();
 
     EffectPtr CreateEffect(
         const QString& effect_id,
-        QString* error = nullptr) const override;
-    QByteArray ExportEffectSettings(const Effect& effect) const override;
+        QString& error) const;
+    QByteArray ExportEffectSettings(const Effect& effect) const;
     bool ImportEffectSettings(
         Effect& effect,
         const QByteArray& settings,
-        QString* error = nullptr) const override;
+        QString& error) const;
 
     bool AttachEffect(
         ClipId clip_id,
         EffectPtr effect,
-        QString* error = nullptr) override;
+        QString& error);
     bool ReplaceEffects(
         std::vector<ClipEffect> effects,
-        QString* error = nullptr) override;
+        QString& error);
     bool EnsureEffect(
         ClipId clip_id,
         const QString& effect_id,
-        QString* error = nullptr) override;
-    QByteArray ExportClipSettings(ClipId clip_id) const override;
+        QString& error);
+    QByteArray ExportClipSettings(ClipId clip_id) const;
     QWidget* CreateSettingsPage(
         ClipId clip_id,
-        QWidget* parent = nullptr) override;
+        QWidget* parent = nullptr);
 
-    void RemoveClip(ClipId clip_id) override;
-    void ClearClips() override;
+    void RemoveClip(ClipId clip_id);
+    void ClearClips();
 
     void StartRuntime(
         qint64 position_ms,
-        const QVector<TimelineClip>& clips) override;
+        const QVector<TimelineClip>& clips);
     void SyncRuntime(
         qint64 position_ms,
-        const QVector<TimelineClip>& clips) override;
-    void StopRuntime() override;
+        const QVector<TimelineClip>& clips);
+    void StopRuntime();
 
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;
 };
-
-std::unique_ptr<TimelineBackend> CreateOpenRgbTimelineBackend(
-    ResourceManagerInterface* resource_manager);
 }

@@ -11,7 +11,7 @@ template<typename Snapshot>
 class SnapshotHistory
 {
 public:
-    explicit SnapshotHistory(std::size_t limit = 100) :
+    explicit SnapshotHistory(std::size_t limit) :
         limit(limit)
     {
     }
@@ -86,11 +86,6 @@ public:
 
     void AcceptUndo()
     {
-        if(!current.has_value() || undo.empty())
-        {
-            return;
-        }
-
         Push(redo, std::move(*current));
         current = std::move(undo.back());
         undo.pop_back();
@@ -98,11 +93,6 @@ public:
 
     void AcceptRedo()
     {
-        if(!current.has_value() || redo.empty())
-        {
-            return;
-        }
-
         Push(undo, std::move(*current));
         current = std::move(redo.back());
         redo.pop_back();
@@ -111,11 +101,6 @@ public:
 private:
     void Push(std::vector<Snapshot>& destination, Snapshot snapshot)
     {
-        if(limit == 0)
-        {
-            return;
-        }
-
         if(destination.size() >= limit)
         {
             destination.erase(destination.begin());

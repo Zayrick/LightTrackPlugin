@@ -1,40 +1,39 @@
 #pragma once
 
-#include "application/AudioService.h"
-
+#include <QString>
+#include <QVector>
+#include <QtGlobal>
 #include <memory>
 
 namespace lighttrack::audio
 {
-class MiniaudioAudioService final : public AudioService
+class MiniaudioAudioService
 {
 public:
     MiniaudioAudioService();
-    ~MiniaudioAudioService() override;
+    ~MiniaudioAudioService();
 
     MiniaudioAudioService(const MiniaudioAudioService&) = delete;
     MiniaudioAudioService& operator=(
         const MiniaudioAudioService&) = delete;
 
-    bool Open(const QString& path) override;
-    void Close() override;
+    bool Open(const QString& path);
+    void Close();
 
-    bool Play() override;
-    void Pause() override;
-    bool Seek(qint64 position_ms) override;
+    bool Play();
+    void Pause();
+    bool Seek(qint64 position_ms);
 
-    bool IsAtEnd() const override;
-    qint64 PositionMs() const override;
-    qint64 DurationMs() const override;
+    bool IsAtEnd() const;
+    qint64 PositionMs() const;
+    qint64 DurationMs() const;
 
     QVector<qreal> AnalyzeWaveform(
         const QString& path,
-        int bar_count) const override;
+        int bar_count) const;
 
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;
 };
-
-std::unique_ptr<AudioService> CreateMiniaudioAudioService();
 }

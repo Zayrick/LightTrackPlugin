@@ -1,6 +1,5 @@
 #pragma once
 
-// Thin OpenRGB host adapter. UI and runtime implementations live in separate modules.
 #include <QObject>
 #include <QPointer>
 #include "OpenRGBPluginInterface.h"

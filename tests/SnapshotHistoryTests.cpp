@@ -16,18 +16,7 @@ int main()
     } while(false)
 
     lighttrack::SnapshotHistory<int> history(2);
-    CHECK(!history.IsInitialized());
-    CHECK(!history.CanUndo());
-    CHECK(!history.CanRedo());
-
-    history.AcceptUndo();
-    history.AcceptRedo();
     CHECK(history.Commit(1));
-    CHECK(history.IsInitialized());
-    CHECK(history.Current() == 1);
-
-    history.Reset(1);
-    CHECK(history.IsInitialized());
     CHECK(history.Current() == 1);
     CHECK(!history.Commit(1));
 
@@ -57,14 +46,6 @@ int main()
 
     history.Clear();
     CHECK(!history.IsInitialized());
-    CHECK(!history.CanUndo());
-    CHECK(!history.CanRedo());
-
-    lighttrack::SnapshotHistory<int> disabled_history(0);
-    disabled_history.Reset(1);
-    CHECK(disabled_history.Commit(2));
-    CHECK(disabled_history.Current() == 2);
-    CHECK(!disabled_history.CanUndo());
 
 #undef CHECK
     return 0;

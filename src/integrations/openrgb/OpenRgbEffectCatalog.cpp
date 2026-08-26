@@ -46,7 +46,7 @@ QVector<EffectGroup> LoadEffectCatalog()
     return groups;
 }
 
-bool FindEffect(const QString& id, EffectDescriptor* effect)
+bool FindEffect(const QString& id, EffectDescriptor& effect)
 {
     for(const EffectGroup& group : LoadEffectCatalog())
     {
@@ -54,10 +54,7 @@ bool FindEffect(const QString& id, EffectDescriptor* effect)
         {
             if(candidate.id == id)
             {
-                if(effect != nullptr)
-                {
-                    *effect = candidate;
-                }
+                effect = candidate;
                 return true;
             }
         }

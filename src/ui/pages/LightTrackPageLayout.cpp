@@ -1,7 +1,5 @@
 #include "ui/pages/LightTrackPagePrivate.h"
 
-#include "application/LayoutRepository.h"
-#include "application/TimelineBackend.h"
 #include "core/effects/EffectDescriptor.h"
 #include "ui/timeline/TimelineEditor.h"
 
@@ -23,7 +21,7 @@ namespace
 {
 using lighttrack::ClipId;
 using lighttrack::EffectDescriptor;
-using lighttrack::TimelineBackend;
+using lighttrack::openrgb::OpenRgbTimelineBackend;
 
 std::string ToUtf8String(const QString& value)
 {
@@ -40,7 +38,7 @@ struct PreparedClipState
     int lane = -1;
     qint64 start_ms = 0;
     qint64 end_ms = 0;
-    TimelineBackend::EffectPtr effect;
+    OpenRgbTimelineBackend::EffectPtr effect;
 };
 }
 
@@ -48,10 +46,7 @@ namespace lighttrack::ui
 {
 void LightTrackPage::PrepareForDeviceReload()
 {
-    if(backend != nullptr)
-    {
-        backend->PrepareForDeviceReload();
-    }
+    backend.PrepareForDeviceReload();
 }
 
 void LightTrackPage::ReloadDevices()
@@ -65,13 +60,8 @@ void LightTrackPage::ReloadDevices()
         restore_layout = true;
     }
 
-    const TimelineBackend::DeviceSnapshot devices =
-        backend != nullptr
-        ? backend->ReloadDevices()
-        : TimelineBackend::DeviceSnapshot{
-            {},
-            QStringLiteral("Timeline backend unavailable")
-        };
+    const OpenRgbTimelineBackend::DeviceSnapshot devices =
+        backend.ReloadDevices();
     timeline_editor->SetLanes(
         devices.lanes,
         devices.empty_message);
@@ -85,8 +75,8 @@ void LightTrackPage::ReloadDevices()
     QStringList warnings;
     if(ApplyLayoutState(
         preserved_layout,
-        &error,
-        &warnings))
+        error,
+        warnings))
     {
         history.ReplaceCurrent(std::move(preserved_layout));
         UpdateHistoryButtons();
@@ -101,7 +91,7 @@ void LightTrackPage::InitializeHistory()
 {
     QString error;
     LayoutSnapshot snapshot;
-    if(TryCaptureLayoutState(&snapshot, &error))
+    if(TryCaptureLayoutState(snapshot, error))
     {
         history.Reset(std::move(snapshot));
     }
@@ -114,8 +104,7 @@ void LightTrackPage::InitializeHistory()
 
 void LightTrackPage::FlushPendingHistory()
 {
-    if(history_commit_timer != nullptr
-        && history_commit_timer->isActive())
+    if(history_commit_timer->isActive())
     {
         history_commit_timer->stop();
     }
@@ -131,7 +120,7 @@ void LightTrackPage::CommitHistorySnapshot()
 
     QString error;
     LayoutSnapshot snapshot;
-    if(!TryCaptureLayoutState(&snapshot, &error))
+    if(!TryCaptureLayoutState(snapshot, error))
     {
         return;
     }
@@ -144,14 +133,8 @@ void LightTrackPage::CommitHistorySnapshot()
 
 void LightTrackPage::UpdateHistoryButtons()
 {
-    if(toolbar_undo_button != nullptr)
-    {
-        toolbar_undo_button->setEnabled(history.CanUndo());
-    }
-    if(toolbar_redo_button != nullptr)
-    {
-        toolbar_redo_button->setEnabled(history.CanRedo());
-    }
+    toolbar_undo_button->setEnabled(history.CanUndo());
+    toolbar_redo_button->setEnabled(history.CanRedo());
 }
 
 void LightTrackPage::Undo()
@@ -165,7 +148,7 @@ void LightTrackPage::Undo()
 
     QString error;
     QStringList warnings;
-    if(!ApplyLayoutState(*target, &error, &warnings))
+    if(!ApplyLayoutState(*target, error, warnings))
     {
         QMessageBox::critical(this, "Cannot undo", error);
         return;
@@ -193,7 +176,7 @@ void LightTrackPage::Redo()
 
     QString error;
     QStringList warnings;
-    if(!ApplyLayoutState(*target, &error, &warnings))
+    if(!ApplyLayoutState(*target, error, warnings))
     {
         QMessageBox::critical(this, "Cannot redo", error);
         return;
@@ -222,11 +205,10 @@ LayoutSnapshot LightTrackPage::CaptureLayoutState()
     for(const TimelineClip& clip : clips)
     {
         QString backend_error;
-        if(backend == nullptr
-            || !backend->EnsureEffect(
-                clip.id,
-                clip.effect_id,
-                &backend_error))
+        if(!backend.EnsureEffect(
+            clip.id,
+            clip.effect_id,
+            backend_error))
         {
             throw std::runtime_error(
                 ToUtf8String(
@@ -239,51 +221,37 @@ LayoutSnapshot LightTrackPage::CaptureLayoutState()
         layout.clips.push_back({
             clip.id,
             clip.effect_id,
-            backend->SerializeLane(clip.lane_index),
+            backend.SerializeLane(clip.lane_index),
             clip.start_ms,
             clip.end_ms,
-            backend->ExportClipSettings(clip.id)
+            backend.ExportClipSettings(clip.id)
         });
     }
     return layout;
 }
 
 bool LightTrackPage::TryCaptureLayoutState(
-    LayoutSnapshot* snapshot,
-    QString* error)
+    LayoutSnapshot& snapshot,
+    QString& error)
 {
     try
     {
-        if(snapshot != nullptr)
-        {
-            *snapshot = CaptureLayoutState();
-        }
+        snapshot = CaptureLayoutState();
         return true;
     }
     catch(const std::exception& exception)
     {
-        if(error != nullptr)
-        {
-            *error = QString(
-                "Could not serialize the current layout: %1")
-                .arg(QString::fromUtf8(exception.what()));
-        }
-    }
-    catch(...)
-    {
-        if(error != nullptr)
-        {
-            *error =
-                "Could not serialize the current layout.";
-        }
+        error = QString(
+            "Could not serialize the current layout: %1")
+            .arg(QString::fromUtf8(exception.what()));
     }
     return false;
 }
 
 bool LightTrackPage::ApplyLayoutState(
     const LayoutSnapshot& layout,
-    QString* error,
-    QStringList* warnings)
+    QString& error,
+    QStringList& warnings)
 {
     bool commit_started = false;
     const auto clear_partial_commit =
@@ -294,7 +262,7 @@ bool LightTrackPage::ApplyLayoutState(
                 return;
             }
 
-            backend->ClearClips();
+            backend.ClearClips();
             replacing_layout_effects = true;
             timeline_editor->ClearTimelineClips();
             replacing_layout_effects = false;
@@ -303,10 +271,7 @@ bool LightTrackPage::ApplyLayoutState(
                 settings_placeholder);
         };
 
-    if(warnings != nullptr)
-    {
-        warnings->clear();
-    }
+    warnings.clear();
 
     try
     {
@@ -315,12 +280,6 @@ bool LightTrackPage::ApplyLayoutState(
             qMax<qint64>(0, layout.music.duration_ms);
         qint64 restored_timeline_duration_ms =
             saved_music_duration;
-
-        if(backend == nullptr)
-        {
-            throw std::runtime_error(
-                "Timeline backend is unavailable");
-        }
 
         std::vector<PreparedClipState> prepared_clips;
         prepared_clips.reserve(
@@ -343,33 +302,27 @@ bool LightTrackPage::ApplyLayoutState(
             }
 
             EffectDescriptor definition;
-            if(!backend->FindEffect(
+            if(!backend.FindEffect(
                 clip.effect_id,
-                &definition))
+                definition))
             {
-                if(warnings != nullptr)
-                {
-                    warnings->push_back(
-                        QString(
-                            "Skipped clip %1: effect \"%2\" is unavailable.")
-                            .arg(clip_number)
-                            .arg(clip.effect_id));
-                }
+                warnings.push_back(
+                    QString(
+                        "Skipped clip %1: effect \"%2\" is unavailable.")
+                        .arg(clip_number)
+                        .arg(clip.effect_id));
                 continue;
             }
 
             const int lane =
-                backend->ResolveLane(clip.serialized_lane);
+                backend.ResolveLane(clip.serialized_lane);
             if(lane < 0)
             {
-                if(warnings != nullptr)
-                {
-                    warnings->push_back(
-                        QString(
-                            "Skipped clip %1 (%2): its device or zone is unavailable.")
-                            .arg(clip_number)
-                            .arg(definition.name));
-                }
+                warnings.push_back(
+                    QString(
+                        "Skipped clip %1 (%2): its device or zone is unavailable.")
+                        .arg(clip_number)
+                        .arg(definition.name));
                 continue;
             }
 
@@ -387,10 +340,10 @@ bool LightTrackPage::ApplyLayoutState(
                 clip.end_ms);
 
             QString backend_error;
-            TimelineBackend::EffectPtr runtime_effect =
-                backend->CreateEffect(
+            OpenRgbTimelineBackend::EffectPtr runtime_effect =
+                backend.CreateEffect(
                     clip.effect_id,
-                    &backend_error);
+                    backend_error);
             if(runtime_effect == nullptr)
             {
                 throw std::runtime_error(
@@ -401,10 +354,10 @@ bool LightTrackPage::ApplyLayoutState(
                         : backend_error));
             }
 
-            if(!backend->ImportEffectSettings(
+            if(!backend.ImportEffectSettings(
                 *runtime_effect,
                 clip.serialized_effect_settings,
-                &backend_error))
+                backend_error))
             {
                 throw std::runtime_error(
                     ToUtf8String(
@@ -449,12 +402,9 @@ bool LightTrackPage::ApplyLayoutState(
             ++generated_id;
         }
 
-        if(history_commit_timer != nullptr)
-        {
-            history_commit_timer->stop();
-        }
+        history_commit_timer->stop();
 
-        std::vector<TimelineBackend::ClipEffect>
+        std::vector<OpenRgbTimelineBackend::ClipEffect>
             replacement_effects;
         replacement_effects.reserve(prepared_clips.size());
         for(PreparedClipState& prepared : prepared_clips)
@@ -468,9 +418,9 @@ bool LightTrackPage::ApplyLayoutState(
         // Validation and effect construction are complete before commit.
         applying_snapshot = true;
         QString replacement_error;
-        if(!backend->ReplaceEffects(
+        if(!backend.ReplaceEffects(
             std::move(replacement_effects),
-            &replacement_error))
+            replacement_error))
         {
             throw std::runtime_error(
                 ToUtf8String(
@@ -491,10 +441,9 @@ bool LightTrackPage::ApplyLayoutState(
             saved_music_duration);
 
         if(!saved_music_path.isEmpty()
-            && !music_available
-            && warnings != nullptr)
+            && !music_available)
         {
-            warnings->push_back(
+            warnings.push_back(
                 QString(
                     "The music file could not be opened: %1")
                     .arg(saved_music_path));
@@ -530,20 +479,7 @@ bool LightTrackPage::ApplyLayoutState(
         clear_partial_commit();
         applying_snapshot = false;
         replacing_layout_effects = false;
-        if(error != nullptr)
-        {
-            *error = QString::fromUtf8(exception.what());
-        }
-    }
-    catch(...)
-    {
-        clear_partial_commit();
-        applying_snapshot = false;
-        replacing_layout_effects = false;
-        if(error != nullptr)
-        {
-            *error = "The layout could not be restored.";
-        }
+        error = QString::fromUtf8(exception.what());
     }
     return false;
 }
@@ -554,7 +490,7 @@ void LightTrackPage::SaveLayout()
 
     QString error;
     LayoutSnapshot layout;
-    if(!TryCaptureLayoutState(&layout, &error))
+    if(!TryCaptureLayoutState(layout, error))
     {
         QMessageBox::critical(
             this,
@@ -581,14 +517,8 @@ void LightTrackPage::SaveLayout()
         path += ".lighttrack";
     }
 
-    if(layout_repository == nullptr
-        || !layout_repository->Save(path, layout, &error))
+    if(!layout_repository.Save(path, layout, error))
     {
-        if(error.isEmpty())
-        {
-            error =
-                "Layout repository is unavailable.";
-        }
         QMessageBox::critical(
             this,
             "Cannot save layout",
@@ -621,17 +551,11 @@ void LightTrackPage::LoadLayout()
 
     LayoutSnapshot layout;
     QString file_error;
-    if(layout_repository == nullptr
-        || !layout_repository->Load(
+    if(!layout_repository.Load(
             path,
-            &layout,
-            &file_error))
+            layout,
+            file_error))
     {
-        if(file_error.isEmpty())
-        {
-            file_error =
-                "Layout repository is unavailable.";
-        }
         QMessageBox::critical(
             this,
             "Cannot load layout",
@@ -642,7 +566,7 @@ void LightTrackPage::LoadLayout()
     FlushPendingHistory();
     QString error;
     QStringList warnings;
-    if(!ApplyLayoutState(layout, &error, &warnings))
+    if(!ApplyLayoutState(layout, error, warnings))
     {
         QMessageBox::critical(
             this,

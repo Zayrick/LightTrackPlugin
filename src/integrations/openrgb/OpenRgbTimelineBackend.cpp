@@ -31,7 +31,7 @@ namespace
 using json = nlohmann::json;
 using lighttrack::ClipId;
 using lighttrack::EffectDescriptor;
-using lighttrack::TimelineBackend;
+using lighttrack::openrgb::OpenRgbTimelineBackend;
 using lighttrack::TimelineClip;
 using lighttrack::TimelineLane;
 
@@ -54,23 +54,6 @@ QString ExceptionMessage(const std::exception& exception)
 {
     return QString::fromUtf8(exception.what());
 }
-
-class OpenRgbEffect final : public TimelineBackend::Effect
-{
-public:
-    explicit OpenRgbEffect(std::unique_ptr<RGBEffect> value) :
-        value_(std::move(value))
-    {
-    }
-
-    RGBEffect* Get() const noexcept
-    {
-        return value_.get();
-    }
-
-private:
-    std::unique_ptr<RGBEffect> value_;
-};
 
 // OpenRGBEffectPage reparents the RGBEffect into its widget tree. The
 // timeline backend remains the sole owner, so detach it before QWidget's
@@ -105,16 +88,6 @@ private:
     QPointer<RGBEffect> effect_;
 };
 
-OpenRgbEffect* AsOpenRgbEffect(TimelineBackend::Effect* effect)
-{
-    return dynamic_cast<OpenRgbEffect*>(effect);
-}
-
-const OpenRgbEffect* AsOpenRgbEffect(const TimelineBackend::Effect* effect)
-{
-    return dynamic_cast<const OpenRgbEffect*>(effect);
-}
-
 struct LaneEntry
 {
     QString name;
@@ -144,6 +117,19 @@ struct RuntimeTarget
 
 namespace lighttrack::openrgb
 {
+OpenRgbTimelineBackend::Effect::Effect(
+    std::unique_ptr<RGBEffect> value) :
+    value_(std::move(value))
+{
+}
+
+OpenRgbTimelineBackend::Effect::~Effect() = default;
+
+RGBEffect* OpenRgbTimelineBackend::Effect::Get() const noexcept
+{
+    return value_.get();
+}
+
 class OpenRgbTimelineBackend::Impl
 {
 public:
@@ -167,7 +153,7 @@ public:
         DiscardRuntimeForDeviceReload();
     }
 
-    TimelineBackend::DeviceSnapshot ReloadDevices()
+    OpenRgbTimelineBackend::DeviceSnapshot ReloadDevices()
     {
         // OpenRGB deletes hardware controllers before publishing the refreshed
         // device list.  At this point every cached ControllerZone may therefore
@@ -179,7 +165,7 @@ public:
         runtime_zones_.clear();
         lanes_.clear();
 
-        TimelineBackend::DeviceSnapshot snapshot;
+        OpenRgbTimelineBackend::DeviceSnapshot snapshot;
         if(resource_manager_ == nullptr)
         {
             snapshot.empty_message =
@@ -365,23 +351,21 @@ public:
                 serialized_lane.constData() + serialized_lane.size());
             return ResolveLane(lane);
         }
-        catch(...)
+        catch(const std::exception&)
         {
             return -1;
         }
     }
 
-    TimelineBackend::EffectPtr CreateEffect(
+    OpenRgbTimelineBackend::EffectPtr CreateEffect(
         const QString& effect_id,
-        QString* error) const
+        QString& error) const
     {
         EffectDescriptor descriptor;
-        if(!lighttrack::openrgb::FindEffect(effect_id, &descriptor))
+        if(!lighttrack::openrgb::FindEffect(effect_id, descriptor))
         {
-            SetError(
-                error,
-                QStringLiteral("Effect \"%1\" is unavailable.")
-                    .arg(effect_id));
+            error = QStringLiteral("Effect \"%1\" is unavailable.")
+                .arg(effect_id);
             return {};
         }
 
@@ -389,39 +373,35 @@ public:
             effect_factory_.Create(descriptor);
         if(!effect)
         {
-            SetError(
-                error,
-                QStringLiteral("Could not create effect \"%1\".")
-                    .arg(descriptor.name));
+            error = QStringLiteral("Could not create effect \"%1\".")
+                .arg(descriptor.name);
             return {};
         }
 
-        return std::make_unique<OpenRgbEffect>(std::move(effect));
+        return std::make_unique<OpenRgbTimelineBackend::Effect>(
+            std::move(effect));
     }
 
     QByteArray ExportEffectSettings(
-        const TimelineBackend::Effect& effect) const
+        const OpenRgbTimelineBackend::Effect& effect) const
     {
-        const OpenRgbEffect* openrgb_effect =
-            AsOpenRgbEffect(&effect);
-        if(openrgb_effect == nullptr || openrgb_effect->Get() == nullptr)
+        if(effect.Get() == nullptr)
         {
             throw std::runtime_error("Invalid effect instance");
         }
 
         return QByteArray::fromStdString(
-            openrgb_effect->Get()->ToJson().dump());
+            effect.Get()->ToJson().dump());
     }
 
     bool ImportEffectSettings(
-        TimelineBackend::Effect& effect,
+        OpenRgbTimelineBackend::Effect& effect,
         const QByteArray& settings,
-        QString* error) const
+        QString& error) const
     {
-        OpenRgbEffect* openrgb_effect = AsOpenRgbEffect(&effect);
-        if(openrgb_effect == nullptr || openrgb_effect->Get() == nullptr)
+        if(effect.Get() == nullptr)
         {
-            SetError(error, QStringLiteral("Invalid effect instance"));
+            error = QStringLiteral("Invalid effect instance");
             return false;
         }
 
@@ -430,44 +410,36 @@ public:
             const json parsed = json::parse(
                 settings.constData(),
                 settings.constData() + settings.size());
-            effect_factory_.ApplySettings(*openrgb_effect->Get(), parsed);
+            effect_factory_.ApplySettings(*effect.Get(), parsed);
             return true;
         }
         catch(const std::exception& exception)
         {
-            SetError(error, ExceptionMessage(exception));
-        }
-        catch(...)
-        {
-            SetError(error, QStringLiteral("Invalid effect settings"));
+            error = ExceptionMessage(exception);
         }
         return false;
     }
 
     bool AttachEffect(
         ClipId clip_id,
-        TimelineBackend::EffectPtr effect,
-        QString* error)
+        OpenRgbTimelineBackend::EffectPtr effect,
+        QString& error)
     {
         if(!clip_id.IsValid())
         {
-            SetError(error, QStringLiteral("Invalid timeline clip id"));
+            error = QStringLiteral("Invalid timeline clip id");
             return false;
         }
 
-        OpenRgbEffect* openrgb_effect =
-            AsOpenRgbEffect(effect.get());
-        if(openrgb_effect == nullptr || openrgb_effect->Get() == nullptr)
+        if(effect == nullptr || effect->Get() == nullptr)
         {
-            SetError(error, QStringLiteral("Invalid effect instance"));
+            error = QStringLiteral("Invalid effect instance");
             return false;
         }
 
         if(clip_effects_.find(clip_id) != clip_effects_.end())
         {
-            SetError(
-                error,
-                QStringLiteral("Timeline clip already has an effect"));
+            error = QStringLiteral("Timeline clip already has an effect");
             return false;
         }
 
@@ -476,22 +448,18 @@ public:
     }
 
     bool ReplaceEffects(
-        std::vector<TimelineBackend::ClipEffect> effects,
-        QString* error)
+        std::vector<OpenRgbTimelineBackend::ClipEffect> effects,
+        QString& error)
     {
-        std::map<ClipId, TimelineBackend::EffectPtr> replacement;
-        for(TimelineBackend::ClipEffect& binding : effects)
+        std::map<ClipId, OpenRgbTimelineBackend::EffectPtr> replacement;
+        for(OpenRgbTimelineBackend::ClipEffect& binding : effects)
         {
-            OpenRgbEffect* openrgb_effect =
-                AsOpenRgbEffect(binding.effect.get());
             if(!binding.clip_id.IsValid()
-                || openrgb_effect == nullptr
-                || openrgb_effect->Get() == nullptr)
+                || binding.effect == nullptr
+                || binding.effect->Get() == nullptr)
             {
-                SetError(
-                    error,
-                    QStringLiteral(
-                        "Invalid timeline effect replacement"));
+                error = QStringLiteral(
+                    "Invalid timeline effect replacement");
                 return false;
             }
 
@@ -500,10 +468,7 @@ public:
                 std::move(binding.effect));
             if(!inserted.second)
             {
-                SetError(
-                    error,
-                    QStringLiteral(
-                        "Duplicate timeline clip id"));
+                error = QStringLiteral("Duplicate timeline clip id");
                 return false;
             }
         }
@@ -523,14 +488,14 @@ public:
     bool EnsureEffect(
         ClipId clip_id,
         const QString& effect_id,
-        QString* error)
+        QString& error)
     {
         if(clip_effects_.find(clip_id) != clip_effects_.end())
         {
             return true;
         }
 
-        TimelineBackend::EffectPtr effect =
+        OpenRgbTimelineBackend::EffectPtr effect =
             CreateEffect(effect_id, error);
         return effect != nullptr
             && AttachEffect(clip_id, std::move(effect), error);
@@ -555,9 +520,8 @@ public:
             return nullptr;
         }
 
-        OpenRgbEffect* openrgb_effect =
-            AsOpenRgbEffect(found->second.get());
-        if(openrgb_effect == nullptr || openrgb_effect->Get() == nullptr)
+        RGBEffect* effect = found->second->Get();
+        if(effect == nullptr)
         {
             return nullptr;
         }
@@ -565,13 +529,13 @@ public:
         OpenRGBEffectPage* page =
             new BackendOwnedEffectPage(
                 parent,
-                openrgb_effect->Get());
+                effect);
         page->SetPreviewButtonVisible(false);
         page->setMinimumWidth(0);
         page->setSizePolicy(
             QSizePolicy::Ignored,
             QSizePolicy::Expanding);
-        openrgb_effect->Get()->show();
+        effect->show();
         return page;
     }
 
@@ -734,15 +698,13 @@ public:
             if(!EnsureEffect(
                 assignment.first,
                 clip.effect_id,
-                &ignored_error))
+                ignored_error))
             {
                 continue;
             }
 
-            OpenRgbEffect* holder = AsOpenRgbEffect(
-                clip_effects_[assignment.first].get());
             RGBEffect* effect =
-                holder == nullptr ? nullptr : holder->Get();
+                clip_effects_[assignment.first]->Get();
             if(effect == nullptr)
             {
                 continue;
@@ -814,14 +776,6 @@ private:
         runtime_assignments_.clear();
         last_clips_.clear();
         runtime_running_ = false;
-    }
-
-    static void SetError(QString* destination, const QString& value)
-    {
-        if(destination != nullptr)
-        {
-            *destination = value;
-        }
     }
 
     bool ControllerMatches(
@@ -1262,11 +1216,10 @@ private:
         return true;
     }
 
-    void DeactivateEffect(TimelineBackend::Effect* effect) const
+    void DeactivateEffect(OpenRgbTimelineBackend::Effect* effect) const
     {
-        OpenRgbEffect* holder = AsOpenRgbEffect(effect);
         RGBEffect* runtime_effect =
-            holder == nullptr ? nullptr : holder->Get();
+            effect == nullptr ? nullptr : effect->Get();
         if(runtime_effect == nullptr)
         {
             return;
@@ -1286,7 +1239,7 @@ private:
     std::map<QString, LaneState> lane_states_;
     std::vector<std::unique_ptr<ControllerZone>> runtime_zones_;
     QVector<RuntimeTarget> runtime_targets_;
-    std::map<ClipId, TimelineBackend::EffectPtr> clip_effects_;
+    std::map<ClipId, OpenRgbTimelineBackend::EffectPtr> clip_effects_;
     std::map<ClipId, std::vector<ControllerZone*>>
         runtime_assignments_;
     std::set<ControllerZone*> black_targets_;
@@ -1311,14 +1264,14 @@ QVector<EffectGroup> OpenRgbTimelineBackend::Effects() const
 
 bool OpenRgbTimelineBackend::FindEffect(
     const QString& effect_id,
-    EffectDescriptor* descriptor) const
+    EffectDescriptor& descriptor) const
 {
     return lighttrack::openrgb::FindEffect(
         effect_id,
         descriptor);
 }
 
-TimelineBackend::DeviceSnapshot
+OpenRgbTimelineBackend::DeviceSnapshot
 OpenRgbTimelineBackend::ReloadDevices()
 {
     return impl_->ReloadDevices();
@@ -1362,9 +1315,9 @@ void OpenRgbTimelineBackend::PrepareForDeviceReload()
     impl_->PrepareForDeviceReload();
 }
 
-TimelineBackend::EffectPtr OpenRgbTimelineBackend::CreateEffect(
+OpenRgbTimelineBackend::EffectPtr OpenRgbTimelineBackend::CreateEffect(
     const QString& effect_id,
-    QString* error) const
+    QString& error) const
 {
     return impl_->CreateEffect(effect_id, error);
 }
@@ -1378,7 +1331,7 @@ QByteArray OpenRgbTimelineBackend::ExportEffectSettings(
 bool OpenRgbTimelineBackend::ImportEffectSettings(
     Effect& effect,
     const QByteArray& settings,
-    QString* error) const
+    QString& error) const
 {
     return impl_->ImportEffectSettings(effect, settings, error);
 }
@@ -1386,7 +1339,7 @@ bool OpenRgbTimelineBackend::ImportEffectSettings(
 bool OpenRgbTimelineBackend::AttachEffect(
     ClipId clip_id,
     EffectPtr effect,
-    QString* error)
+    QString& error)
 {
     return impl_->AttachEffect(
         clip_id,
@@ -1396,7 +1349,7 @@ bool OpenRgbTimelineBackend::AttachEffect(
 
 bool OpenRgbTimelineBackend::ReplaceEffects(
     std::vector<ClipEffect> effects,
-    QString* error)
+    QString& error)
 {
     return impl_->ReplaceEffects(std::move(effects), error);
 }
@@ -1404,7 +1357,7 @@ bool OpenRgbTimelineBackend::ReplaceEffects(
 bool OpenRgbTimelineBackend::EnsureEffect(
     ClipId clip_id,
     const QString& effect_id,
-    QString* error)
+    QString& error)
 {
     return impl_->EnsureEffect(clip_id, effect_id, error);
 }
@@ -1451,10 +1404,4 @@ void OpenRgbTimelineBackend::StopRuntime()
     impl_->StopRuntime();
 }
 
-std::unique_ptr<TimelineBackend> CreateOpenRgbTimelineBackend(
-    ResourceManagerInterface* resource_manager)
-{
-    return std::make_unique<OpenRgbTimelineBackend>(
-        resource_manager);
-}
 }

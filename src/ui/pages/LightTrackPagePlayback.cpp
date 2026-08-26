@@ -1,7 +1,5 @@
 #include "ui/pages/LightTrackPagePrivate.h"
 
-#include "application/AudioService.h"
-#include "application/TimelineBackend.h"
 #include "ui/timeline/TimelineEditor.h"
 
 #include <QFileDialog>
@@ -28,30 +26,21 @@ void LightTrackPage::UpdateMinimumTimelineDuration()
 
 void LightTrackPage::StartRuntime(qint64 position_ms)
 {
-    if(backend != nullptr)
-    {
-        backend->StartRuntime(
-            position_ms,
-            timeline_editor->TimelineClips());
-    }
+    backend.StartRuntime(
+        position_ms,
+        timeline_editor->TimelineClips());
 }
 
 void LightTrackPage::StopRuntime()
 {
-    if(backend != nullptr)
-    {
-        backend->StopRuntime();
-    }
+    backend.StopRuntime();
 }
 
 void LightTrackPage::SyncRuntime(qint64 position_ms)
 {
-    if(backend != nullptr)
-    {
-        backend->SyncRuntime(
-            position_ms,
-            timeline_editor->TimelineClips());
-    }
+    backend.SyncRuntime(
+        position_ms,
+        timeline_editor->TimelineClips());
 }
 
 bool LightTrackPage::SetMusicFile(
@@ -93,7 +82,7 @@ bool LightTrackPage::SetMusicFile(
     }
 
     music_spectrum_preview =
-        audio_service->AnalyzeWaveform(
+        audio_service.AnalyzeWaveform(
             path,
             MUSIC_SPECTRUM_BARS);
     timeline_editor->SetMusicSpectrum(
@@ -130,13 +119,12 @@ void LightTrackPage::ChooseMusic()
 
 bool LightTrackPage::OpenMusic(const QString& path)
 {
-    if(audio_service == nullptr
-        || !audio_service->Open(path))
+    if(!audio_service.Open(path))
     {
         return false;
     }
 
-    music_duration_ms = audio_service->DurationMs();
+    music_duration_ms = audio_service.DurationMs();
     music_loaded = true;
     return true;
 }
@@ -151,11 +139,11 @@ void LightTrackPage::PlayMusic()
     if(music_duration_ms > 0
         && MusicPositionMs() >= music_duration_ms - 20)
     {
-        audio_service->Seek(0);
+        audio_service.Seek(0);
         timeline_editor->SetMusicPosition(0);
     }
 
-    if(!audio_service->Play())
+    if(!audio_service.Play())
     {
         MarkMusicError();
         return;
@@ -174,7 +162,7 @@ void LightTrackPage::PauseMusic()
         return;
     }
 
-    audio_service->Pause();
+    audio_service.Pause();
     music_timer->stop();
     music_playing = false;
     SetPlaybackControls(true, false);
@@ -189,8 +177,8 @@ void LightTrackPage::StopMusic()
     }
 
     music_timer->stop();
-    audio_service->Pause();
-    if(!audio_service->Seek(0))
+    audio_service.Pause();
+    if(!audio_service.Seek(0))
     {
         MarkMusicError();
         return;
@@ -217,7 +205,7 @@ void LightTrackPage::SeekMusic(qint64 position_ms)
             music_duration_ms)
         : qMax<qint64>(0, position_ms);
 
-    if(!audio_service->Seek(clamped_position))
+    if(!audio_service.Seek(clamped_position))
     {
         MarkMusicError();
         return;
@@ -237,7 +225,7 @@ void LightTrackPage::UpdateMusicPosition()
         return;
     }
 
-    if(music_playing && audio_service->IsAtEnd())
+    if(music_playing && audio_service.IsAtEnd())
     {
         FinishMusicPlayback();
         return;
@@ -264,24 +252,16 @@ void LightTrackPage::UpdateMusicPosition()
 
 qint64 LightTrackPage::MusicPositionMs() const
 {
-    return audio_service != nullptr
-        ? audio_service->PositionMs()
-        : 0;
+    return audio_service.PositionMs();
 }
 
 void LightTrackPage::CloseMusic()
 {
     StopRuntime();
-    if(music_timer != nullptr)
-    {
-        music_timer->stop();
-    }
+    music_timer->stop();
     music_spectrum_preview.clear();
 
-    if(audio_service != nullptr)
-    {
-        audio_service->Close();
-    }
+    audio_service.Close();
 
     music_loaded = false;
     music_playing = false;
@@ -291,14 +271,8 @@ void LightTrackPage::CloseMusic()
 
 void LightTrackPage::FinishMusicPlayback()
 {
-    if(music_timer != nullptr)
-    {
-        music_timer->stop();
-    }
-    if(audio_service != nullptr)
-    {
-        audio_service->Pause();
-    }
+    music_timer->stop();
+    audio_service.Pause();
     music_playing = false;
     SetPlaybackControls(true, false);
     timeline_editor->SetMusicPosition(music_duration_ms);
@@ -313,47 +287,29 @@ void LightTrackPage::MarkMusicError()
     }
 
     StopRuntime();
-    if(music_timer != nullptr)
-    {
-        music_timer->stop();
-    }
+    music_timer->stop();
 
     const qint64 known_duration_ms = music_duration_ms;
     music_loaded = false;
     music_playing = false;
     music_spectrum_preview.clear();
-    if(audio_service != nullptr)
-    {
-        audio_service->Close();
-    }
+    audio_service.Close();
     music_duration_ms = known_duration_ms;
     timeline_editor->SetMusicSpectrum(
         {},
         music_duration_ms);
     SetPlaybackControls(false, false);
 
-    if(toolbar_music_button != nullptr)
-    {
-        toolbar_music_button->setToolTip(
-            music_path + "\nCannot play this file");
-    }
+    toolbar_music_button->setToolTip(
+        music_path + "\nCannot play this file");
 }
 
 void LightTrackPage::SetPlaybackControls(
     bool enabled,
     bool playing)
 {
-    if(toolbar_play_button != nullptr)
-    {
-        toolbar_play_button->setEnabled(enabled && !playing);
-    }
-    if(toolbar_pause_button != nullptr)
-    {
-        toolbar_pause_button->setEnabled(enabled && playing);
-    }
-    if(toolbar_stop_button != nullptr)
-    {
-        toolbar_stop_button->setEnabled(enabled);
-    }
+    toolbar_play_button->setEnabled(enabled && !playing);
+    toolbar_pause_button->setEnabled(enabled && playing);
+    toolbar_stop_button->setEnabled(enabled);
 }
 }

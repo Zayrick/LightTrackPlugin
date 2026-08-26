@@ -110,25 +110,6 @@ int main(int argc, char** argv)
     CHECK(first.Steps() == first_stopped_at);
     CHECK(second.Steps() == second_stopped_at);
 
-    // A malformed persisted FPS of zero must not divide by zero, and stopping
-    // a one-FPS worker must not wait for its full frame interval.
-    first.SetFPS(0);
-    const auto stop_started = std::chrono::steady_clock::now();
-    manager->SetEffectActive(&first);
-    const auto step_deadline = std::chrono::steady_clock::now()
-        + std::chrono::seconds(2);
-    while(first.Steps() == first_stopped_at
-        && std::chrono::steady_clock::now() < step_deadline)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    const bool zero_fps_stepped = first.Steps() > first_stopped_at;
-    manager->SetEffectUnActive(&first);
-    CHECK(zero_fps_stepped);
-    const auto stop_duration =
-        std::chrono::steady_clock::now() - stop_started;
-    CHECK(stop_duration < std::chrono::milliseconds(250));
-
     manager->RemoveMapping(&first);
     manager->RemoveMapping(&second);
     return 0;

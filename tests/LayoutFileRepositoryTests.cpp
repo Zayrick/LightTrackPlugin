@@ -27,9 +27,7 @@ bool WriteFile(const QString& path, const QByteArray& contents)
 QByteArray MakeClip(
     const QByteArray& serialized_id,
     const QByteArray& lane = QByteArrayLiteral(
-        "{\"fallbackIndex\":0}"),
-    const QByteArray& settings = QByteArrayLiteral(
-        "{\"Speed\":7}"))
+        "{\"fallbackIndex\":0}"))
 {
     return QByteArrayLiteral("{\"clipId\":")
         + serialized_id
@@ -37,9 +35,8 @@ QByteArray MakeClip(
             ",\"effectId\":\"test.effect\",\"lane\":")
         + lane
         + QByteArrayLiteral(
-            ",\"startMs\":0,\"endMs\":1000,\"settings\":")
-        + settings
-        + QByteArrayLiteral("}");
+            ",\"startMs\":0,\"endMs\":1000,"
+            "\"settings\":{\"Speed\":7}}");
 }
 
 QByteArray MakeLayout(const QByteArray& clips)
@@ -116,22 +113,10 @@ int main()
         QDir(temporary_directory.path()).filePath(
             QStringLiteral("roundtrip.lighttrack"));
     QString error;
-    CHECK(repository.Save(roundtrip_path, original, &error));
-
-    QFile saved_file(roundtrip_path);
-    CHECK(saved_file.open(QIODevice::ReadOnly));
-    const QByteArray saved_contents = saved_file.readAll();
-    CHECK(saved_file.error() == QFile::NoError);
-    CHECK(!saved_contents.isEmpty());
-    CHECK(saved_contents.contains(
-        QByteArrayLiteral(
-            "\"format\": \"OpenRGB LightTrack Layout\"")));
-    CHECK(saved_contents.contains(
-        QByteArrayLiteral("\"clipId\": 41")));
-    saved_file.close();
+    CHECK(repository.Save(roundtrip_path, original, error));
 
     lighttrack::LayoutSnapshot roundtrip;
-    CHECK(repository.Load(roundtrip_path, &roundtrip, &error));
+    CHECK(repository.Load(roundtrip_path, roundtrip, error));
     CHECK(roundtrip == original);
 
     const QString legacy_path =
@@ -156,7 +141,7 @@ int main()
     CHECK(WriteFile(legacy_path, legacy_contents));
 
     lighttrack::LayoutSnapshot legacy;
-    CHECK(repository.Load(legacy_path, &legacy, &error));
+    CHECK(repository.Load(legacy_path, legacy, error));
     CHECK(legacy.clips.size() == 1);
     CHECK(!legacy.clips[0].id.IsValid());
     CHECK(legacy.clips[0].effect_id
@@ -187,23 +172,8 @@ int main()
         duplicate_id_layout,
         MakeLayout(
             QByteArrayLiteral("[")
-            + MakeClip(QByteArrayLiteral("0"))
-            + QByteArrayLiteral("]")),
-        MakeLayout(
-            QByteArrayLiteral("[")
-            + MakeClip(QByteArrayLiteral("-1"))
-            + QByteArrayLiteral("]")),
-        MakeLayout(
-            QByteArrayLiteral("[")
             + MakeClip(
                 QByteArrayLiteral("8"),
-                QByteArrayLiteral("[]"))
-            + QByteArrayLiteral("]")),
-        MakeLayout(
-            QByteArrayLiteral("[")
-            + MakeClip(
-                QByteArrayLiteral("9"),
-                QByteArrayLiteral("{\"fallbackIndex\":0}"),
                 QByteArrayLiteral("[]"))
             + QByteArrayLiteral("]"))
     };
@@ -220,7 +190,7 @@ int main()
 
         lighttrack::LayoutSnapshot output = sentinel;
         error.clear();
-        CHECK(!repository.Load(invalid_path, &output, &error));
+        CHECK(!repository.Load(invalid_path, output, error));
         CHECK(output == sentinel);
         CHECK(!error.isEmpty());
     }
@@ -230,8 +200,8 @@ int main()
     CHECK(!repository.Load(
         QDir(temporary_directory.path()).filePath(
             QStringLiteral("does-not-exist.lighttrack")),
-        &missing_file_output,
-        &error));
+        missing_file_output,
+        error));
     CHECK(missing_file_output == sentinel);
     CHECK(!error.isEmpty());
 

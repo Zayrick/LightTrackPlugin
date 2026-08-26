@@ -1,23 +1,21 @@
 #pragma once
 
-#include "application/LayoutRepository.h"
+#include "core/LayoutSnapshot.h"
 
-#include <memory>
+#include <QString>
 
 namespace lighttrack::persistence
 {
-class LayoutFileRepository final : public LayoutRepository
+class LayoutFileRepository
 {
 public:
     bool Save(
         const QString& path,
         const LayoutSnapshot& snapshot,
-        QString* error = nullptr) const override;
+        QString& error) const;
     bool Load(
         const QString& path,
-        LayoutSnapshot* snapshot,
-        QString* error = nullptr) const override;
+        LayoutSnapshot& snapshot,
+        QString& error) const;
 };
-
-std::unique_ptr<LayoutRepository> CreateLayoutFileRepository();
 }

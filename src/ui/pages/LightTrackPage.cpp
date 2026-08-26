@@ -1,8 +1,5 @@
 #include "ui/pages/LightTrackPage.h"
 
-#include "application/AudioService.h"
-#include "application/LayoutRepository.h"
-#include "application/TimelineBackend.h"
 #include "ui/UiHelpers.h"
 #include "ui/pages/LightTrackPagePrivate.h"
 #include "ui/timeline/TimelineEditor.h"
@@ -21,8 +18,6 @@
 #include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
-
-#include <utility>
 
 namespace
 {
@@ -52,14 +47,10 @@ namespace lighttrack::ui
 using namespace page_detail;
 
 LightTrackPage::LightTrackPage(
-    std::unique_ptr<TimelineBackend> backend,
-    std::unique_ptr<AudioService> audio_service,
-    std::unique_ptr<LayoutRepository> layout_repository,
+    ResourceManagerInterface* resource_manager,
     QWidget* parent) :
     QWidget(parent),
-    backend(std::move(backend)),
-    audio_service(std::move(audio_service)),
-    layout_repository(std::move(layout_repository))
+    backend(resource_manager)
 {
     QVBoxLayout* page_layout = new QVBoxLayout(this);
     page_layout->setContentsMargins(
@@ -240,11 +231,7 @@ LightTrackPage::LightTrackPage(
     content_layout->setSpacing(0);
 
     timeline_editor = new TimelineEditor(this);
-    if(this->backend != nullptr)
-    {
-        timeline_editor->SetEffects(
-            this->backend->Effects());
-    }
+    timeline_editor->SetEffects(backend.Effects());
     settings_stack = new QStackedWidget(this);
     music_timer = new QTimer(this);
     music_timer->setInterval(33);
@@ -290,24 +277,21 @@ LightTrackPage::LightTrackPage(
     timeline_editor->SetLaneRenamedCallback(
         [this](int lane_index, const QString& name)
         {
-            return this->backend != nullptr
-                && this->backend->RenameLane(lane_index, name);
+            return backend.RenameLane(lane_index, name);
         });
     timeline_editor->SetLaneHighlightedCallback(
         [this](int lane_index, bool highlighted)
         {
-            return this->backend != nullptr
-                && this->backend->SetLaneHighlighted(
-                    lane_index,
-                    highlighted);
+            return backend.SetLaneHighlighted(
+                lane_index,
+                highlighted);
         });
     timeline_editor->SetLaneDisabledCallback(
         [this](int lane_index, bool disabled)
         {
-            return this->backend != nullptr
-                && this->backend->SetLaneDisabled(
-                    lane_index,
-                    disabled);
+            return backend.SetLaneDisabled(
+                lane_index,
+                disabled);
         });
 
     QWidget* right_column = new QWidget(this);
@@ -499,37 +483,23 @@ LightTrackPage::LightTrackPage(
 LightTrackPage::~LightTrackPage()
 {
     CloseMusic();
-    if(backend != nullptr)
-    {
-        backend->ClearClips();
-    }
+    backend.ClearClips();
     ClearAllClipSettings();
 }
 
 QWidget* CreateLightTrackPage(
-    std::unique_ptr<TimelineBackend> backend,
-    std::unique_ptr<AudioService> audio_service,
-    std::unique_ptr<LayoutRepository> layout_repository)
+    ResourceManagerInterface* resource_manager)
 {
-    return new LightTrackPage(
-        std::move(backend),
-        std::move(audio_service),
-        std::move(layout_repository));
+    return new LightTrackPage(resource_manager);
 }
 
 void ReloadLightTrackDevices(QWidget* page)
 {
-    if(page != nullptr)
-    {
-        static_cast<LightTrackPage*>(page)->ReloadDevices();
-    }
+    static_cast<LightTrackPage*>(page)->ReloadDevices();
 }
 
 void PrepareLightTrackForDeviceReload(QWidget* page)
 {
-    if(page != nullptr)
-    {
-        static_cast<LightTrackPage*>(page)->PrepareForDeviceReload();
-    }
+    static_cast<LightTrackPage*>(page)->PrepareForDeviceReload();
 }
 }

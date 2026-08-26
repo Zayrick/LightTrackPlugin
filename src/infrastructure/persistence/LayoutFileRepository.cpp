@@ -64,7 +64,7 @@ json ParseOpaqueJson(
 ClipId ParseClipId(
     const json& clip,
     int clip_number,
-    std::set<quint64>* used_ids)
+    std::set<quint64>& used_ids)
 {
     if(!clip.contains("clipId"))
     {
@@ -88,8 +88,7 @@ ClipId ParseClipId(
     }
 
     if(id_value == 0
-        || used_ids == nullptr
-        || !used_ids->insert(id_value).second)
+        || !used_ids.insert(id_value).second)
     {
         throw std::runtime_error(
             ToUtf8(
@@ -202,7 +201,7 @@ LayoutSnapshot DecodeLayout(
         }
 
         snapshot.clips.push_back({
-            ParseClipId(clip, clip_number, &used_ids),
+            ParseClipId(clip, clip_number, used_ids),
             FromUtf8(clip["effectId"].get<std::string>()),
             SerializeOpaqueJson(clip["lane"]),
             clip["startMs"].get<qint64>(),
@@ -284,7 +283,7 @@ namespace lighttrack::persistence
 bool LayoutFileRepository::Save(
     const QString& path,
     const LayoutSnapshot& snapshot,
-    QString* error) const
+    QString& error) const
 {
     QByteArray contents;
     try
@@ -294,36 +293,27 @@ bool LayoutFileRepository::Save(
     }
     catch(const std::exception& exception)
     {
-        if(error != nullptr)
-        {
-            *error = QString(
-                "Could not serialize the layout:\n%1")
-                .arg(QString::fromUtf8(exception.what()));
-        }
+        error = QString(
+            "Could not serialize the layout:\n%1")
+            .arg(QString::fromUtf8(exception.what()));
         return false;
     }
 
     QSaveFile file(path);
     if(!file.open(QIODevice::WriteOnly | QIODevice::Text))
     {
-        if(error != nullptr)
-        {
-            *error = QString(
-                "Could not open the file for writing:\n%1")
-                .arg(file.errorString());
-        }
+        error = QString(
+            "Could not open the file for writing:\n%1")
+            .arg(file.errorString());
         return false;
     }
 
     if(file.write(contents) != contents.size()
         || !file.commit())
     {
-        if(error != nullptr)
-        {
-            *error = QString(
-                "Could not write the layout file:\n%1")
-                .arg(file.errorString());
-        }
+        error = QString(
+            "Could not write the layout file:\n%1")
+            .arg(file.errorString());
         return false;
     }
 
@@ -332,29 +322,15 @@ bool LayoutFileRepository::Save(
 
 bool LayoutFileRepository::Load(
     const QString& path,
-    LayoutSnapshot* snapshot,
-    QString* error) const
+    LayoutSnapshot& snapshot,
+    QString& error) const
 {
-    if(snapshot == nullptr)
-    {
-        if(error != nullptr)
-        {
-            *error =
-                QStringLiteral(
-                    "No layout destination was provided.");
-        }
-        return false;
-    }
-
     QFile file(path);
     if(!file.open(QIODevice::ReadOnly | QIODevice::Text))
     {
-        if(error != nullptr)
-        {
-            *error = QString(
-                "Could not open the layout file:\n%1")
-                .arg(file.errorString());
-        }
+        error = QString(
+            "Could not open the layout file:\n%1")
+            .arg(file.errorString());
         return false;
     }
 
@@ -365,33 +341,16 @@ bool LayoutFileRepository::Load(
             contents.constData(),
             contents.constData() + contents.size());
         LayoutSnapshot loaded = DecodeLayout(layout, path);
-        *snapshot = std::move(loaded);
+        snapshot = std::move(loaded);
         return true;
     }
     catch(const std::exception& exception)
     {
-        if(error != nullptr)
-        {
-            *error = QString(
-                "The layout file is invalid:\n%1")
-                .arg(QString::fromUtf8(exception.what()));
-        }
-    }
-    catch(...)
-    {
-        if(error != nullptr)
-        {
-            *error =
-                QStringLiteral(
-                    "The layout file is invalid.");
-        }
+        error = QString(
+            "The layout file is invalid:\n%1")
+            .arg(QString::fromUtf8(exception.what()));
     }
 
     return false;
-}
-
-std::unique_ptr<LayoutRepository> CreateLayoutFileRepository()
-{
-    return std::make_unique<LayoutFileRepository>();
 }
 }

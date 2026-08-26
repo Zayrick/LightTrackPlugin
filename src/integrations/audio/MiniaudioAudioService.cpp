@@ -189,8 +189,4 @@ QVector<qreal> MiniaudioAudioService::AnalyzeWaveform(
         bar_count);
 }
 
-std::unique_ptr<AudioService> CreateMiniaudioAudioService()
-{
-    return std::make_unique<MiniaudioAudioService>();
-}
 }

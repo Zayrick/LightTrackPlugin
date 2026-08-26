@@ -1,6 +1,5 @@
 #include "ui/pages/LightTrackPagePrivate.h"
 
-#include "application/TimelineBackend.h"
 #include "ui/timeline/TimelineEditor.h"
 
 #include <QAbstractButton>
@@ -21,6 +20,7 @@
 #include <QTextEdit>
 #include <QTimer>
 
+#include <exception>
 #include <utility>
 
 namespace lighttrack::ui
@@ -177,14 +177,12 @@ void LightTrackPage::WatchSettingsObject(QObject* object)
 void LightTrackPage::ScheduleHistoryCommit()
 {
     if(applying_snapshot
-        || !history.IsInitialized()
-        || history_commit_timer == nullptr)
+        || !history.IsInitialized())
     {
         return;
     }
 
-    if(settings_stack != nullptr
-        && settings_stack->currentWidget() != nullptr)
+    if(settings_stack->currentWidget() != nullptr)
     {
         WatchSettingsObject(
             settings_stack->currentWidget());
@@ -196,22 +194,21 @@ bool LightTrackPage::EnsureClipEffect(ClipId clip_id)
 {
     const std::optional<TimelineClip> clip =
         timeline_editor->FindClip(clip_id);
-    if(!clip.has_value() || backend == nullptr)
+    if(!clip.has_value())
     {
         return false;
     }
 
     QString ignored_error;
-    return backend->EnsureEffect(
+    return backend.EnsureEffect(
         clip->id,
         clip->effect_id,
-        &ignored_error);
+        ignored_error);
 }
 
 void LightTrackPage::CreateClipSettings(ClipId clip_id)
 {
     if(!clip_id.IsValid()
-        || backend == nullptr
         || clip_settings.find(clip_id)
             != clip_settings.end())
     {
@@ -219,7 +216,7 @@ void LightTrackPage::CreateClipSettings(ClipId clip_id)
     }
 
     QWidget* page =
-        backend->CreateSettingsPage(clip_id, nullptr);
+        backend.CreateSettingsPage(clip_id, nullptr);
     if(page == nullptr)
     {
         return;
@@ -274,11 +271,11 @@ void LightTrackPage::RemoveClipSettings(ClipId clip_id)
         return;
     }
 
-    if(backend != nullptr && !replacing_layout_effects)
+    if(!replacing_layout_effects)
     {
         // Destroy the signal sender first so every vendor settings-page
         // callback is disconnected before its captured UI is released.
-        backend->RemoveClip(clip_id);
+        backend.RemoveClip(clip_id);
     }
 
     const auto settings = clip_settings.find(clip_id);
@@ -303,8 +300,7 @@ void LightTrackPage::DuplicateClipSettings(
     ClipId source_clip_id,
     ClipId duplicated_clip_id)
 {
-    if(backend == nullptr
-        || !source_clip_id.IsValid()
+    if(!source_clip_id.IsValid()
         || !duplicated_clip_id.IsValid())
     {
         return;
@@ -324,56 +320,47 @@ void LightTrackPage::DuplicateClipSettings(
     try
     {
         QString error;
-        if(!backend->EnsureEffect(
+        if(!backend.EnsureEffect(
             source_clip_id,
             source_clip->effect_id,
-            &error))
+            error))
         {
             return;
         }
 
         const QByteArray settings =
-            backend->ExportClipSettings(source_clip_id);
-        TimelineBackend::EffectPtr duplicated_effect =
-            backend->CreateEffect(
+            backend.ExportClipSettings(source_clip_id);
+        openrgb::OpenRgbTimelineBackend::EffectPtr duplicated_effect =
+            backend.CreateEffect(
                 duplicated_clip->effect_id,
-                &error);
+                error);
         if(duplicated_effect == nullptr
-            || !backend->ImportEffectSettings(
+            || !backend.ImportEffectSettings(
                 *duplicated_effect,
                 settings,
-                &error))
+                error))
         {
             return;
         }
 
-        backend->AttachEffect(
+        backend.AttachEffect(
             duplicated_clip_id,
             std::move(duplicated_effect),
-            &error);
+            error);
     }
-    catch(...)
+    catch(const std::exception&)
     {
-        // The normal timeline-change path will create a default effect
-        // instance if the source settings cannot be copied.
+        return;
     }
 }
 
 void LightTrackPage::ClearAllClipSettings()
 {
-    if(settings_stack != nullptr
-        && settings_placeholder != nullptr)
-    {
-        settings_stack->setCurrentWidget(
-            settings_placeholder);
-    }
+    settings_stack->setCurrentWidget(settings_placeholder);
 
     for(auto& entry : clip_settings)
     {
-        if(settings_stack != nullptr)
-        {
-            settings_stack->removeWidget(entry.second);
-        }
+        settings_stack->removeWidget(entry.second);
         delete entry.second;
     }
     clip_settings.clear();

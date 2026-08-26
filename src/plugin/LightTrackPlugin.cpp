@@ -1,9 +1,6 @@
 #include "plugin/LightTrackPlugin.h"
 
-#include "infrastructure/persistence/LayoutFileRepository.h"
-#include "integrations/audio/MiniaudioAudioService.h"
 #include "integrations/openrgb/OpenRgbEffectsRuntime.h"
-#include "integrations/openrgb/OpenRgbTimelineBackend.h"
 #include "ui/pages/LightTrackPage.h"
 
 #include "ResourceManagerInterface.h"
@@ -62,11 +59,7 @@ QWidget* LightTrackPlugin::GetWidget()
             resource_manager->WaitForDeviceDetection();
         }
 
-        page = lighttrack::ui::CreateLightTrackPage(
-            lighttrack::openrgb::CreateOpenRgbTimelineBackend(
-                resource_manager),
-            lighttrack::audio::CreateMiniaudioAudioService(),
-            lighttrack::persistence::CreateLayoutFileRepository());
+        page = lighttrack::ui::CreateLightTrackPage(resource_manager);
     }
 
     if(resource_manager != nullptr
