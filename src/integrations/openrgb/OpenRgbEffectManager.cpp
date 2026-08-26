@@ -205,6 +205,7 @@ void EffectManager::EffectThreadFunction(RGBEffect* effect)
 
             std::lock_guard<std::mutex> frame_guard(
                 lighttrack::openrgb::ControllerFrameMutex());
+            lighttrack::openrgb::SetCurrentRenderingEffect(effect);
             effect->StepEffect(controller_zones);
 
             std::set<RGBController*> controllers;
@@ -220,6 +221,7 @@ void EffectManager::EffectThreadFunction(RGBEffect* effect)
             {
                 controller->UpdateLEDs();
             }
+            lighttrack::openrgb::SetCurrentRenderingEffect(nullptr);
 
             const TCount end = clock->now();
             fps = static_cast<int>(std::max(1U, effect->GetFPS()));

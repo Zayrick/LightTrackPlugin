@@ -1,4 +1,7 @@
 #include "EffectManager.h"
+#include "integrations/openrgb/OpenRgbColorRouter.h"
+
+#include "ColorUtils.h"
 
 #include <QApplication>
 
@@ -9,6 +12,59 @@
 
 namespace
 {
+class RecordingController final : public RGBController
+{
+public:
+    RecordingController()
+    {
+        name = "Router output";
+        type = DEVICE_TYPE_VIRTUAL;
+        zones.resize(1);
+        zones[0].name = "Output";
+        zones[0].type = ZONE_TYPE_LINEAR;
+        zones[0].leds_count = 2;
+        zones[0].leds_min = 2;
+        zones[0].leds_max = 2;
+        leds.resize(2);
+        SetupColors();
+
+        modes.resize(1);
+        modes[0].name = "Direct";
+        modes[0].color_mode = MODE_COLORS_PER_LED;
+    }
+
+    void UpdateLEDs() override
+    {
+        updates++;
+    }
+
+    void SetupZones() override
+    {
+    }
+
+    void ResizeZone(int, int) override
+    {
+    }
+
+    void DeviceUpdateLEDs() override
+    {
+    }
+
+    void UpdateZoneLEDs(int) override
+    {
+    }
+
+    void UpdateSingleLED(int) override
+    {
+    }
+
+    void DeviceUpdateMode() override
+    {
+    }
+
+    int updates = 0;
+};
+
 class CountingEffect final : public RGBEffect
 {
 public:
@@ -112,5 +168,45 @@ int main(int argc, char** argv)
 
     manager->RemoveMapping(&first);
     manager->RemoveMapping(&second);
+
+    RecordingController output;
+    ControllerZone output_zone(&output, 0, false, 100, false);
+    lighttrack::openrgb::OpenRgbColorRouter router;
+    router.SetTargets({&output_zone});
+    router.ConfigureLayers({
+        {lighttrack::ClipId(1), 0, 0, {&output_zone}},
+        {lighttrack::ClipId(2), 1, 1, {&output_zone}}
+    });
+
+    router.StartOutput();
+    CHECK(output.colors[0] == ColorUtils::OFF());
+
+    const std::vector<ControllerZone*> lower =
+        router.LayerZones(lighttrack::ClipId(1));
+    const std::vector<ControllerZone*> upper =
+        router.LayerZones(lighttrack::ClipId(2));
+    CHECK(lower.size() == 1);
+    CHECK(upper.size() == 1);
+    CHECK(lower[0] != upper[0]);
+    CHECK(lower[0]->controller != &output);
+
+    router.SetLayerActive(lighttrack::ClipId(1), true);
+    lower[0]->SetAllZoneLEDs(ToRGBColor(255, 0, 0), 100, 0, 0);
+    lower[0]->controller->UpdateLEDs();
+    CHECK(output.colors[0] == ToRGBColor(255, 0, 0));
+
+    router.SetLayerActive(lighttrack::ClipId(2), true);
+    upper[0]->SetAllZoneLEDs(ToRGBColor(0, 0, 255), 100, 0, 0);
+    upper[0]->controller->UpdateLEDs();
+    CHECK(output.colors[0] == ToRGBColor(0, 0, 255));
+
+    lower[0]->SetAllZoneLEDs(ToRGBColor(0, 255, 0), 100, 0, 0);
+    lower[0]->controller->UpdateLEDs();
+    CHECK(output.colors[0] == ToRGBColor(0, 0, 255));
+
+    router.SetLayerActive(lighttrack::ClipId(2), false);
+    CHECK(output.colors[0] == ToRGBColor(0, 255, 0));
+    router.SetLayerActive(lighttrack::ClipId(1), false);
+    CHECK(output.colors[0] == ColorUtils::OFF());
     return 0;
 }

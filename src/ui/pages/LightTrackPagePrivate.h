@@ -105,6 +105,8 @@ private:
     void StartRuntime(qint64 position_ms);
     void StopRuntime();
     void SyncRuntime(qint64 position_ms);
+    void ScheduleRuntimeBoundary(qint64 position_ms);
+    void UpdateRuntimeBoundary();
 
     bool SetMusicFile(
         const QString& path,
@@ -139,6 +141,7 @@ private:
     QPushButton* toolbar_stop_button = nullptr;
     QPushButton* toolbar_snap_button = nullptr;
     QTimer* music_timer = nullptr;
+    QTimer* runtime_boundary_timer = nullptr;
     QTimer* history_commit_timer = nullptr;
     QString music_path;
     QString current_layout_path;

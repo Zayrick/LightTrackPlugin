@@ -235,6 +235,10 @@ LightTrackPage::LightTrackPage(
     settings_stack = new QStackedWidget(this);
     music_timer = new QTimer(this);
     music_timer->setInterval(33);
+    music_timer->setTimerType(Qt::PreciseTimer);
+    runtime_boundary_timer = new QTimer(this);
+    runtime_boundary_timer->setSingleShot(true);
+    runtime_boundary_timer->setTimerType(Qt::PreciseTimer);
     history_commit_timer = new QTimer(this);
     history_commit_timer->setSingleShot(true);
     history_commit_timer->setInterval(250);
@@ -272,6 +276,10 @@ LightTrackPage::LightTrackPage(
     timeline_editor->SetTimelineChangedCallback([this]()
     {
         UpdateMinimumTimelineDuration();
+        if(music_playing)
+        {
+            SyncRuntime(MusicPositionMs());
+        }
         CommitHistorySnapshot();
     });
     timeline_editor->SetLaneRenamedCallback(
@@ -396,6 +404,11 @@ LightTrackPage::LightTrackPage(
         &QTimer::timeout,
         this,
         [this]() { UpdateMusicPosition(); });
+    connect(
+        runtime_boundary_timer,
+        &QTimer::timeout,
+        this,
+        [this]() { UpdateRuntimeBoundary(); });
     connect(
         history_commit_timer,
         &QTimer::timeout,

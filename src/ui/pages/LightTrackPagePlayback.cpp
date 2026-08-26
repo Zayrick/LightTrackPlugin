@@ -7,6 +7,8 @@
 #include <QPushButton>
 #include <QTimer>
 
+#include <limits>
+
 namespace lighttrack::ui
 {
 using namespace page_detail;
@@ -29,10 +31,12 @@ void LightTrackPage::StartRuntime(qint64 position_ms)
     backend.StartRuntime(
         position_ms,
         timeline_editor->TimelineClips());
+    ScheduleRuntimeBoundary(position_ms);
 }
 
 void LightTrackPage::StopRuntime()
 {
+    runtime_boundary_timer->stop();
     backend.StopRuntime();
 }
 
@@ -41,6 +45,49 @@ void LightTrackPage::SyncRuntime(qint64 position_ms)
     backend.SyncRuntime(
         position_ms,
         timeline_editor->TimelineClips());
+    ScheduleRuntimeBoundary(position_ms);
+}
+
+void LightTrackPage::ScheduleRuntimeBoundary(qint64 position_ms)
+{
+    if(!music_playing)
+    {
+        runtime_boundary_timer->stop();
+        return;
+    }
+
+    qint64 next_boundary_ms = std::numeric_limits<qint64>::max();
+    for(const TimelineClip& clip : timeline_editor->TimelineClips())
+    {
+        if(clip.start_ms > position_ms)
+        {
+            next_boundary_ms = qMin(next_boundary_ms, clip.start_ms);
+        }
+        if(clip.end_ms > position_ms)
+        {
+            next_boundary_ms = qMin(next_boundary_ms, clip.end_ms);
+        }
+    }
+
+    if(next_boundary_ms == std::numeric_limits<qint64>::max())
+    {
+        runtime_boundary_timer->stop();
+        return;
+    }
+
+    const qint64 delay_ms = qBound<qint64>(
+        1,
+        next_boundary_ms - position_ms,
+        std::numeric_limits<int>::max());
+    runtime_boundary_timer->start(static_cast<int>(delay_ms));
+}
+
+void LightTrackPage::UpdateRuntimeBoundary()
+{
+    if(music_playing)
+    {
+        SyncRuntime(MusicPositionMs());
+    }
 }
 
 bool LightTrackPage::SetMusicFile(

@@ -2,7 +2,7 @@
 
 #include "integrations/openrgb/OpenRgbEffectCatalog.h"
 #include "integrations/openrgb/OpenRgbEffectFactory.h"
-#include "integrations/openrgb/OpenRgbRenderCoordinator.h"
+#include "integrations/openrgb/OpenRgbColorRouter.h"
 
 #include "ColorUtils.h"
 #include "ControllerZone.h"
@@ -18,9 +18,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include <algorithm>
 #include <map>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -140,9 +138,9 @@ public:
 
     ~Impl()
     {
-        shutting_down_ = true;
         ClearClips();
-        SendBlackToTargets(AllRuntimeZones(), true);
+        color_router_.Blackout();
+        color_router_.Reset();
     }
 
     void PrepareForDeviceReload()
@@ -160,7 +158,6 @@ public:
         // contain a dangling controller pointer.  Detach effects and discard
         // the cached targets without trying to write a final frame to them.
         DiscardRuntimeForDeviceReload();
-        black_targets_.clear();
         runtime_targets_.clear();
         runtime_zones_.clear();
         lanes_.clear();
@@ -259,7 +256,8 @@ public:
                 lane.led_count
             });
         }
-        SendOverrideFrame();
+        color_router_.SetTargets(AllRuntimeZones());
+        RefreshOverrideOutput();
         return snapshot;
     }
 
@@ -286,12 +284,10 @@ public:
             return false;
         }
 
-        const std::vector<ControllerZone*> previous_overrides =
-            OverriddenTargets();
         LaneEntry& lane = lanes_[lane_index];
         lane.highlighted = highlighted;
         lane_states_[lane.state_key].highlighted = highlighted;
-        RefreshOverrideOutput(previous_overrides);
+        RefreshOverrideOutput();
         return true;
     }
 
@@ -302,12 +298,10 @@ public:
             return false;
         }
 
-        const std::vector<ControllerZone*> previous_overrides =
-            OverriddenTargets();
         LaneEntry& lane = lanes_[lane_index];
         lane.disabled = disabled;
         lane_states_[lane.state_key].disabled = disabled;
-        RefreshOverrideOutput(previous_overrides);
+        RefreshOverrideOutput();
         return true;
     }
 
@@ -443,7 +437,9 @@ public:
             return false;
         }
 
+        RGBEffect* runtime_effect = effect->Get();
         clip_effects_.emplace(clip_id, std::move(effect));
+        color_router_.BindEffect(clip_id, runtime_effect);
         return true;
     }
 
@@ -481,6 +477,8 @@ public:
             DeactivateEffect(entry.second.get());
         }
         runtime_assignments_.clear();
+        configured_clips_.clear();
+        color_router_.ConfigureLayers({});
         clip_effects_.swap(replacement);
         return true;
     }
@@ -544,14 +542,12 @@ public:
         const auto found = clip_effects_.find(clip_id);
         if(found != clip_effects_.end())
         {
+            color_router_.SetLayerActive(clip_id, false);
             DeactivateEffect(found->second.get());
-            runtime_assignments_.erase(clip_id);
+            color_router_.BindEffect(clip_id, nullptr);
             clip_effects_.erase(found);
         }
-        else
-        {
-            runtime_assignments_.erase(clip_id);
-        }
+        runtime_assignments_.erase(clip_id);
     }
 
     void ClearClips()
@@ -562,6 +558,8 @@ public:
             DeactivateEffect(entry.second.get());
         }
         runtime_assignments_.clear();
+        configured_clips_.clear();
+        color_router_.ConfigureLayers({});
         clip_effects_.clear();
     }
 
@@ -569,24 +567,28 @@ public:
         qint64 position_ms,
         const QVector<TimelineClip>& clips)
     {
-        last_position_ms_ = position_ms;
-        last_clips_ = clips;
         if(runtime_running_)
         {
             SyncRuntime(position_ms, clips);
             return;
         }
 
+        ConfigureRoutes(clips);
         runtime_running_ = true;
-        SendBlackToTargets(AllRuntimeZones(), true);
+        color_router_.StartOutput();
         SyncRuntime(position_ms, clips);
-        SendOverrideFrame();
     }
 
     void StopRuntime()
     {
         const bool was_running =
             runtime_running_ || !runtime_assignments_.empty();
+        runtime_running_ = false;
+
+        if(was_running)
+        {
+            color_router_.StopOutput();
+        }
 
         for(auto& entry : clip_effects_)
         {
@@ -594,86 +596,50 @@ public:
         }
 
         runtime_assignments_.clear();
-        runtime_running_ = false;
-
-        if(was_running)
-        {
-            SendBlackToTargets(AllRuntimeZones(), true);
-        }
-        if(!shutting_down_)
-        {
-            SendOverrideFrame();
-        }
     }
 
     void SyncRuntime(
         qint64 position_ms,
         const QVector<TimelineClip>& clips)
     {
-        last_position_ms_ = position_ms;
-        last_clips_ = clips;
         if(!runtime_running_)
         {
             return;
         }
 
-        std::set<ControllerZone*> previous_active_targets;
-        for(const auto& assignment : runtime_assignments_)
+        if(!RoutesMatch(clips))
         {
-            previous_active_targets.insert(
-                assignment.second.begin(),
-                assignment.second.end());
+            color_router_.StopOutput();
+            for(auto& entry : clip_effects_)
+            {
+                DeactivateEffect(entry.second.get());
+            }
+            runtime_assignments_.clear();
+            ConfigureRoutes(clips);
+            color_router_.StartOutput();
         }
 
-        std::map<ClipId, TimelineClip> assigned_clips;
-        std::map<ClipId, std::vector<ControllerZone*>> assignments;
-
-        for(const RuntimeTarget& target : runtime_targets_)
+        std::map<ClipId, const TimelineClip*> active_clips;
+        for(const TimelineClip& clip : clips)
         {
-            if(target.zone == nullptr)
+            if(clip.start_ms > position_ms
+                || position_ms >= clip.end_ms
+                || !color_router_.HasLayer(clip.id))
             {
                 continue;
             }
-            if(IsTargetDisabled(target.lane)
-                || IsTargetHighlighted(target.lane))
-            {
-                continue;
-            }
-
-            const TimelineClip* best_clip = nullptr;
-            int best_level = -1;
-
-            for(const TimelineClip& clip : clips)
-            {
-                if(clip.start_ms > position_ms
-                    || position_ms >= clip.end_ms
-                    || !LaneCoversTarget(
-                        clip.lane_index,
-                        target.lane))
-                {
-                    continue;
-                }
-
-                const int level = lanes_[clip.lane_index].level;
-                if(level >= best_level)
-                {
-                    best_clip = &clip;
-                    best_level = level;
-                }
-            }
-
-            if(best_clip != nullptr)
-            {
-                assignments[best_clip->id].push_back(target.zone);
-                assigned_clips[best_clip->id] = *best_clip;
-            }
+            active_clips[clip.id] = &clip;
         }
 
         for(auto assignment = runtime_assignments_.begin();
             assignment != runtime_assignments_.end();)
         {
-            if(assignments.find(assignment->first) == assignments.end())
+            if(active_clips.find(assignment->first)
+                == active_clips.end())
             {
+                color_router_.SetLayerActive(
+                    assignment->first,
+                    false);
                 const auto effect =
                     clip_effects_.find(assignment->first);
                 if(effect != clip_effects_.end())
@@ -688,15 +654,19 @@ public:
             }
         }
 
-        std::set<ControllerZone*> active_targets;
         EffectManager* manager = EffectManager::Get();
-
-        for(auto& assignment : assignments)
+        for(const auto& active : active_clips)
         {
-            const TimelineClip& clip = assigned_clips[assignment.first];
+            if(runtime_assignments_.find(active.first)
+                != runtime_assignments_.end())
+            {
+                continue;
+            }
+
+            const TimelineClip& clip = *active.second;
             QString ignored_error;
             if(!EnsureEffect(
-                assignment.first,
+                active.first,
                 clip.effect_id,
                 ignored_error))
             {
@@ -704,65 +674,25 @@ public:
             }
 
             RGBEffect* effect =
-                clip_effects_[assignment.first]->Get();
+                clip_effects_[active.first]->Get();
             if(effect == nullptr)
             {
                 continue;
             }
 
-            const auto previous =
-                runtime_assignments_.find(assignment.first);
-            if(previous == runtime_assignments_.end()
-                || previous->second != assignment.second)
-            {
-                manager->Assign(assignment.second, effect);
-                runtime_assignments_[assignment.first] =
-                    assignment.second;
-            }
-
-            if(!manager->IsActive(effect))
-            {
-                manager->SetEffectActive(effect);
-            }
-
-            active_targets.insert(
-                assignment.second.begin(),
-                assignment.second.end());
-        }
-
-        for(ControllerZone* target : active_targets)
-        {
-            black_targets_.erase(target);
-        }
-
-        // Clear a target only when it transitions away from an effect. The
-        // old implementation rewrote every idle zone and submitted the whole
-        // controller every 33 ms, racing all active effect threads.
-        std::vector<ControllerZone*> newly_inactive_targets;
-        for(ControllerZone* target : previous_active_targets)
-        {
-            if(target == nullptr
-                || active_targets.find(target) != active_targets.end())
+            std::vector<ControllerZone*> zones =
+                color_router_.LayerZones(active.first);
+            if(zones.empty())
             {
                 continue;
             }
 
-            const auto runtime_target = std::find_if(
-                runtime_targets_.begin(),
-                runtime_targets_.end(),
-                [target](const RuntimeTarget& candidate)
-                {
-                    return candidate.zone == target;
-                });
-            if(runtime_target != runtime_targets_.end()
-                && !IsTargetDisabled(runtime_target->lane)
-                && !IsTargetHighlighted(runtime_target->lane))
-            {
-                newly_inactive_targets.push_back(target);
-            }
+            color_router_.BindEffect(active.first, effect);
+            color_router_.SetLayerActive(active.first, true);
+            manager->Assign(zones, effect);
+            runtime_assignments_[active.first] = std::move(zones);
+            manager->SetEffectActive(effect);
         }
-
-        SendBlackToTargets(newly_inactive_targets, false);
     }
 
 private:
@@ -774,8 +704,75 @@ private:
         }
 
         runtime_assignments_.clear();
-        last_clips_.clear();
+        configured_clips_.clear();
         runtime_running_ = false;
+        color_router_.Reset();
+    }
+
+    bool RoutesMatch(const QVector<TimelineClip>& clips) const
+    {
+        if(clips.size() != configured_clips_.size())
+        {
+            return false;
+        }
+
+        for(int index = 0; index < clips.size(); ++index)
+        {
+            if(clips[index].id != configured_clips_[index].id
+                || clips[index].effect_id
+                    != configured_clips_[index].effect_id
+                || clips[index].lane_index
+                    != configured_clips_[index].lane_index)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void ConfigureRoutes(const QVector<TimelineClip>& clips)
+    {
+        std::vector<OpenRgbColorRouter::LayerDefinition> definitions;
+        definitions.reserve(clips.size());
+
+        for(int sequence = 0; sequence < clips.size(); ++sequence)
+        {
+            const TimelineClip& clip = clips[sequence];
+            if(!clip.id.IsValid()
+                || clip.lane_index < 0
+                || clip.lane_index >= lanes_.size())
+            {
+                continue;
+            }
+
+            OpenRgbColorRouter::LayerDefinition definition;
+            definition.clip_id = clip.id;
+            definition.lane_level = lanes_[clip.lane_index].level;
+            definition.sequence = sequence;
+            for(const RuntimeTarget& target : runtime_targets_)
+            {
+                if(target.zone != nullptr
+                    && LaneCoversTarget(
+                        clip.lane_index,
+                        target.lane))
+                {
+                    definition.targets.push_back(target.zone);
+                }
+            }
+            if(!definition.targets.empty())
+            {
+                definitions.push_back(std::move(definition));
+            }
+        }
+
+        color_router_.ConfigureLayers(std::move(definitions));
+        configured_clips_ = clips;
+        for(const auto& effect : clip_effects_)
+        {
+            color_router_.BindEffect(
+                effect.first,
+                effect.second->Get());
+        }
     }
 
     bool ControllerMatches(
@@ -1016,172 +1013,32 @@ private:
         return false;
     }
 
-    std::vector<ControllerZone*> OverriddenTargets() const
+    void RefreshOverrideOutput()
     {
-        std::vector<ControllerZone*> zones;
+        std::vector<OpenRgbColorRouter::TargetOverride> overrides;
         for(const RuntimeTarget& target : runtime_targets_)
         {
-            if(target.zone != nullptr
-                && (IsTargetDisabled(target.lane)
-                    || IsTargetHighlighted(target.lane)))
-            {
-                zones.push_back(target.zone);
-            }
-        }
-        return zones;
-    }
-
-    void RefreshOverrideOutput(
-        const std::vector<ControllerZone*>& previous_overrides)
-    {
-        if(runtime_running_)
-        {
-            SyncRuntime(last_position_ms_, last_clips_);
-        }
-
-        const std::vector<ControllerZone*> current_overrides =
-            OverriddenTargets();
-        const std::set<ControllerZone*> current_set(
-            current_overrides.begin(),
-            current_overrides.end());
-        std::vector<ControllerZone*> released;
-        for(ControllerZone* zone : previous_overrides)
-        {
-            bool assigned_to_effect = false;
-            for(const auto& assignment : runtime_assignments_)
-            {
-                if(std::find(
-                        assignment.second.begin(),
-                        assignment.second.end(),
-                        zone) != assignment.second.end())
-                {
-                    assigned_to_effect = true;
-                    break;
-                }
-            }
-
-            if(current_set.find(zone) == current_set.end()
-                && !assigned_to_effect)
-            {
-                released.push_back(zone);
-            }
-        }
-
-        SendBlackToTargets(released, true);
-        SendOverrideFrame();
-    }
-
-    void SendOverrideFrame()
-    {
-        std::lock_guard<std::mutex> frame_guard(
-            ControllerFrameMutex());
-        std::set<RGBController*> controllers;
-        for(const RuntimeTarget& target : runtime_targets_)
-        {
-            if(target.zone == nullptr
-                || target.zone->controller == nullptr)
+            if(target.zone == nullptr)
             {
                 continue;
             }
 
-            RGBColor color;
             if(IsTargetDisabled(target.lane))
             {
-                color = ColorUtils::OFF();
-                black_targets_.insert(target.zone);
+                overrides.push_back({
+                    target.zone,
+                    ColorUtils::OFF()
+                });
             }
             else if(IsTargetHighlighted(target.lane))
             {
-                color = ToRGBColor(255, 255, 255);
-                black_targets_.erase(target.zone);
-            }
-            else
-            {
-                continue;
-            }
-
-            target.zone->SetAllZoneLEDs(color, 100, 0, 0);
-            controllers.insert(target.zone->controller);
-        }
-
-        for(RGBController* controller : controllers)
-        {
-            ForceDirectMode(controller);
-            controller->UpdateLEDs();
-        }
-    }
-
-    void ForceDirectMode(RGBController* controller) const
-    {
-        if(controller == nullptr)
-        {
-            return;
-        }
-
-        for(unsigned int index = 0;
-            index < controller->modes.size();
-            ++index)
-        {
-            if(controller->modes[index].name == "Direct")
-            {
-                if(controller->GetMode()
-                    != static_cast<int>(index))
-                {
-                    controller->SetMode(index);
-                }
-                return;
+                overrides.push_back({
+                    target.zone,
+                    ToRGBColor(255, 255, 255)
+                });
             }
         }
-
-        controller->SetCustomMode();
-        controller->UpdateMode();
-    }
-
-    void SendBlackToTargets(
-        const std::vector<ControllerZone*>& zones,
-        bool force_mode)
-    {
-        std::vector<ControllerZone*> pending;
-        pending.reserve(zones.size());
-        for(ControllerZone* controller_zone : zones)
-        {
-            if(controller_zone == nullptr
-                || controller_zone->controller == nullptr
-                || black_targets_.find(controller_zone)
-                    != black_targets_.end())
-            {
-                continue;
-            }
-            pending.push_back(controller_zone);
-        }
-
-        if(pending.empty())
-        {
-            return;
-        }
-
-        std::lock_guard<std::mutex> frame_guard(
-            ControllerFrameMutex());
-        std::set<RGBController*> controllers;
-        for(ControllerZone* controller_zone : pending)
-        {
-            controller_zone->SetAllZoneLEDs(
-                ColorUtils::OFF(),
-                100,
-                0,
-                0);
-            controllers.insert(controller_zone->controller);
-            black_targets_.insert(controller_zone);
-        }
-
-        for(RGBController* controller : controllers)
-        {
-            if(force_mode)
-            {
-                ForceDirectMode(controller);
-            }
-            controller->UpdateLEDs();
-        }
+        color_router_.SetOverrides(std::move(overrides));
     }
 
     bool LaneCoversTarget(int lane, int target_lane) const
@@ -1235,6 +1092,7 @@ private:
 
     ResourceManagerInterface* resource_manager_ = nullptr;
     EffectFactory effect_factory_;
+    OpenRgbColorRouter color_router_;
     QVector<LaneEntry> lanes_;
     std::map<QString, LaneState> lane_states_;
     std::vector<std::unique_ptr<ControllerZone>> runtime_zones_;
@@ -1242,11 +1100,8 @@ private:
     std::map<ClipId, OpenRgbTimelineBackend::EffectPtr> clip_effects_;
     std::map<ClipId, std::vector<ControllerZone*>>
         runtime_assignments_;
-    std::set<ControllerZone*> black_targets_;
-    QVector<TimelineClip> last_clips_;
-    qint64 last_position_ms_ = 0;
+    QVector<TimelineClip> configured_clips_;
     bool runtime_running_ = false;
-    bool shutting_down_ = false;
 };
 
 OpenRgbTimelineBackend::OpenRgbTimelineBackend(

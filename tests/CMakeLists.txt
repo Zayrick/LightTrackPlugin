@@ -25,6 +25,7 @@ add_executable(lighttrack_openrgb_runtime_tests
   OpenRgbEffectManagerTests.cpp
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbEffectManager.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbRenderCoordinator.cpp"
+  "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbColorRouter.cpp"
   "${OPENRGB_DIR}/RGBController/RGBController.cpp"
   "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/RGBEffect.h"
 )

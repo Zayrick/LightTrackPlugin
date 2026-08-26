@@ -65,6 +65,8 @@ add_library(LightTrackPlugin SHARED
   src/integrations/openrgb/OpenRgbEffectManager.cpp
   src/integrations/openrgb/OpenRgbRenderCoordinator.h
   src/integrations/openrgb/OpenRgbRenderCoordinator.cpp
+  src/integrations/openrgb/OpenRgbColorRouter.h
+  src/integrations/openrgb/OpenRgbColorRouter.cpp
   src/integrations/openrgb/OpenRgbTimelineBackend.h
   src/integrations/openrgb/OpenRgbTimelineBackend.cpp
 )
