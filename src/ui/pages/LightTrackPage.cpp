@@ -489,4 +489,12 @@ void ReloadLightTrackDevices(QWidget* page)
         static_cast<LightTrackPage*>(page)->ReloadDevices();
     }
 }
+
+void PrepareLightTrackForDeviceReload(QWidget* page)
+{
+    if(page != nullptr)
+    {
+        static_cast<LightTrackPage*>(page)->PrepareForDeviceReload();
+    }
+}
 }

@@ -34,6 +34,7 @@ public:
     bool SetLaneDisabled(
         int lane_index,
         bool disabled) override;
+    void PrepareForDeviceReload() override;
 
     EffectPtr CreateEffect(
         const QString& effect_id,

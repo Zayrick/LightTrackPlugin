@@ -63,6 +63,10 @@ public:
         int lane_index,
         bool disabled) = 0;
 
+    // Called synchronously before OpenRGB invalidates controller pointers.
+    // Implementations must stop hardware workers without writing a final frame.
+    virtual void PrepareForDeviceReload() = 0;
+
     virtual EffectPtr CreateEffect(
         const QString& effect_id,
         QString* error = nullptr) const = 0;

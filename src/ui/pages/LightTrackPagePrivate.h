@@ -65,6 +65,7 @@ public:
     LightTrackPage& operator=(const LightTrackPage&) = delete;
 
     void ReloadDevices();
+    void PrepareForDeviceReload();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

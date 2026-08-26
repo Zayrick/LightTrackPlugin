@@ -37,6 +37,47 @@ else()
   )
 endif()
 
+add_executable(lighttrack_openrgb_runtime_tests
+  OpenRgbEffectManagerTests.cpp
+)
+
+target_include_directories(lighttrack_openrgb_runtime_tests PRIVATE
+  "${OPENRGB_DIR}/RGBController"
+  "${OPENRGB_DIR}/dependencies/json"
+  "${OPENRGB_DIR}/qt"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects"
+)
+
+target_link_libraries(lighttrack_openrgb_runtime_tests PRIVATE
+  lighttrack_openrgb
+  lighttrack_audio
+  Qt${QT_VERSION_MAJOR}::Widgets
+)
+
+if(WIN32)
+  add_test(
+    NAME lighttrack_openrgb.effect_manager
+    COMMAND
+      ${CMAKE_COMMAND}
+      -E
+      env
+      "QT_QPA_PLATFORM=offscreen"
+      "PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Widgets>;$ENV{PATH}"
+      $<TARGET_FILE:lighttrack_openrgb_runtime_tests>
+  )
+else()
+  add_test(
+    NAME lighttrack_openrgb.effect_manager
+    COMMAND
+      ${CMAKE_COMMAND}
+      -E
+      env
+      "QT_QPA_PLATFORM=offscreen"
+      $<TARGET_FILE:lighttrack_openrgb_runtime_tests>
+  )
+endif()
+
 add_test(
   NAME lighttrack_architecture.boundaries
   COMMAND

@@ -113,7 +113,8 @@ function(lighttrack_configure_openrgb_effects)
     "${LIGHTTRACK_OPENRGB_DIR}/qt/QTooltipedSlider.cpp"
     "${LIGHTTRACK_OPENRGB_EFFECTS_PLUGIN_DIR}/EffectListManager.cpp"
     "${LIGHTTRACK_OPENRGB_EFFECTS_PLUGIN_DIR}/EffectList.cpp"
-    "${LIGHTTRACK_OPENRGB_EFFECTS_PLUGIN_DIR}/EffectManager.cpp"
+    # EffectManager.cpp is replaced by OpenRgbEffectManager.cpp in the owning
+    # target so timeline writes and effect frames share one synchronization path.
     "${LIGHTTRACK_OPENRGB_EFFECTS_PLUGIN_DIR}/EffectSearch.cpp"
     "${LIGHTTRACK_OPENRGB_EFFECTS_PLUGIN_DIR}/LivePreviewController.cpp"
     "${LIGHTTRACK_OPENRGB_EFFECTS_PLUGIN_DIR}/OpenRGBEffectSettings.cpp"

@@ -144,6 +144,10 @@ add_library(lighttrack_openrgb OBJECT
   src/integrations/openrgb/OpenRgbEffectFactory.cpp
   src/integrations/openrgb/OpenRgbEffectsRuntime.h
   src/integrations/openrgb/OpenRgbEffectsRuntime.cpp
+  # Thread-safe replacement for the upstream EffectManager.cpp implementation.
+  src/integrations/openrgb/OpenRgbEffectManager.cpp
+  src/integrations/openrgb/OpenRgbRenderCoordinator.h
+  src/integrations/openrgb/OpenRgbRenderCoordinator.cpp
   src/integrations/openrgb/OpenRgbTimelineBackend.h
   src/integrations/openrgb/OpenRgbTimelineBackend.cpp
 )

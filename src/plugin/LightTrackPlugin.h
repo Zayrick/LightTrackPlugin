@@ -5,6 +5,8 @@
 #include <QPointer>
 #include "OpenRGBPluginInterface.h"
 
+#include <atomic>
+
 class ResourceManagerInterface;
 
 class LightTrackPlugin : public QObject, public OpenRGBPluginInterface
@@ -25,8 +27,15 @@ public:
 
 private:
     static void DeviceListChangedCallback(void* ptr);
+    static void DeviceDetectionStartedCallback(void* ptr);
+    static void DeviceDetectionFinishedCallback(void* ptr);
+
+    void PrepareForDeviceReload();
+    void QueueDeviceReload();
 
     ResourceManagerInterface* resource_manager = nullptr;
     QPointer<QWidget> page;
     bool callbacks_registered = false;
+    std::atomic<bool> detection_in_progress{false};
+    std::atomic<bool> reload_queued{false};
 };

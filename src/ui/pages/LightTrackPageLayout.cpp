@@ -46,6 +46,14 @@ struct PreparedClipState
 
 namespace lighttrack::ui
 {
+void LightTrackPage::PrepareForDeviceReload()
+{
+    if(backend != nullptr)
+    {
+        backend->PrepareForDeviceReload();
+    }
+}
+
 void LightTrackPage::ReloadDevices()
 {
     LayoutSnapshot preserved_layout;

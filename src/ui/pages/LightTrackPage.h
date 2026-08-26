@@ -18,4 +18,5 @@ QWidget* CreateLightTrackPage(
     std::unique_ptr<AudioService> audio_service,
     std::unique_ptr<LayoutRepository> layout_repository);
 void ReloadLightTrackDevices(QWidget* page);
+void PrepareLightTrackForDeviceReload(QWidget* page);
 }

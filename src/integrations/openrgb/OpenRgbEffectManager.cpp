@@ -1,0 +1,310 @@
+#include "EffectManager.h"
+
+#include "integrations/openrgb/OpenRgbRenderCoordinator.h"
+
+#include <algorithm>
+#include <chrono>
+#include <set>
+#include <utility>
+
+EffectManager* EffectManager::instance;
+
+EffectManager::EffectManager() :
+    clock(new std::chrono::steady_clock())
+{
+}
+
+EffectManager* EffectManager::Get()
+{
+    if(!instance)
+    {
+        instance = new EffectManager();
+    }
+    return instance;
+}
+
+void EffectManager::SetEffectActive(RGBEffect* effect)
+{
+    effect->EffectState(true);
+
+    std::lock_guard<std::mutex> guard(lock);
+    if(EffectThreads.find(effect) != EffectThreads.end())
+    {
+        return;
+    }
+
+    ActiveEffects.push_back(effect);
+    EffectThreads[effect] = nullptr;
+    EffectThreads[effect] = new std::thread(
+        &EffectManager::EffectThreadFunction,
+        this,
+        effect);
+}
+
+void EffectManager::SetEffectUnActive(RGBEffect* effect)
+{
+    std::thread* thread = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        const auto found = EffectThreads.find(effect);
+        if(found != EffectThreads.end())
+        {
+            thread = found->second;
+            EffectThreads.erase(found);
+
+            const auto active = std::find(
+                ActiveEffects.begin(),
+                ActiveEffects.end(),
+                effect);
+            if(active != ActiveEffects.end())
+            {
+                ActiveEffects.erase(active);
+            }
+        }
+    }
+
+    if(thread != nullptr)
+    {
+        thread->join();
+        delete thread;
+    }
+
+    // Stop effect-owned resources only after StepEffect can no longer run.
+    effect->EffectState(false);
+}
+
+bool EffectManager::IsActive(RGBEffect* effect)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    return EffectThreads.find(effect) != EffectThreads.end();
+}
+
+void EffectManager::RemoveMapping(RGBEffect* effect)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    effect_zones.erase(effect);
+    previews.erase(effect);
+}
+
+void EffectManager::ClearAssignments()
+{
+    std::lock_guard<std::mutex> guard(lock);
+    effect_zones.clear();
+    previews.clear();
+}
+
+void EffectManager::Assign(
+    std::vector<ControllerZone*> controller_zones,
+    RGBEffect* effect)
+{
+    printf(
+        "[OpenRGBEffectsPlugin] Assigning %zu zones to %s\n",
+        controller_zones.size(),
+        effect->EffectDetails.EffectName.c_str());
+
+    std::lock_guard<std::mutex> guard(lock);
+    effect_zones[effect] = controller_zones;
+
+    for(auto& entry : effect_zones)
+    {
+        RGBEffect* other_effect = entry.first;
+        if(other_effect == effect)
+        {
+            continue;
+        }
+
+        std::vector<ControllerZone*> remaining_zones;
+        for(ControllerZone* zone : entry.second)
+        {
+            if(std::find(
+                    controller_zones.begin(),
+                    controller_zones.end(),
+                    zone) == controller_zones.end())
+            {
+                remaining_zones.push_back(zone);
+            }
+        }
+        entry.second = std::move(remaining_zones);
+    }
+
+    std::set<RGBController*> controllers;
+    for(ControllerZone* controller_zone : controller_zones)
+    {
+        if(controller_zone != nullptr
+            && controller_zone->controller != nullptr)
+        {
+            controllers.insert(controller_zone->controller);
+        }
+    }
+
+    for(RGBController* controller : controllers)
+    {
+        for(unsigned int index = 0;
+            index < controller->modes.size();
+            ++index)
+        {
+            if(controller->modes[index].name == "Direct")
+            {
+                if(controller->GetMode() != static_cast<int>(index))
+                {
+                    controller->SetMode(index);
+                }
+                break;
+            }
+        }
+    }
+
+    NotifySelectionChanged(effect);
+}
+
+std::vector<ControllerZone*> EffectManager::GetAssignedZones(
+    RGBEffect* effect)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    return effect_zones[effect];
+}
+
+std::map<RGBEffect*, std::vector<ControllerZone*>>
+EffectManager::GetEffectsMapping()
+{
+    std::lock_guard<std::mutex> guard(lock);
+    return effect_zones;
+}
+
+void EffectManager::EffectThreadFunction(RGBEffect* effect)
+{
+    printf(
+        "[OpenRGBEffectsPlugin] Effect %s thread started\n",
+        effect->EffectDetails.EffectName.c_str());
+
+    const TCount effect_start = clock->now();
+    int last_total_duration = -1;
+
+    while(true)
+    {
+        const TCount start = clock->now();
+        int fps = 1;
+        bool emit_measure = false;
+        int duration_us = 0;
+        int total_duration = 0;
+
+        {
+            std::unique_lock<std::mutex> state_guard(lock);
+            if(EffectThreads.find(effect) == EffectThreads.end())
+            {
+                break;
+            }
+
+            std::vector<ControllerZone*> controller_zones =
+                effect_zones[effect];
+            const auto preview = previews.find(effect);
+            if(preview != previews.end())
+            {
+                controller_zones.push_back(preview->second);
+            }
+
+            std::lock_guard<std::mutex> frame_guard(
+                lighttrack::openrgb::ControllerFrameMutex());
+            effect->StepEffect(controller_zones);
+
+            std::set<RGBController*> controllers;
+            for(ControllerZone* controller_zone : controller_zones)
+            {
+                if(controller_zone != nullptr
+                    && controller_zone->controller != nullptr)
+                {
+                    controllers.insert(controller_zone->controller);
+                }
+            }
+            for(RGBController* controller : controllers)
+            {
+                controller->UpdateLEDs();
+            }
+
+            const TCount end = clock->now();
+            fps = static_cast<int>(std::max(1U, effect->GetFPS()));
+            duration_us = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    end - start).count());
+            total_duration = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    end - effect_start).count());
+            if(total_duration > last_total_duration)
+            {
+                last_total_duration = total_duration;
+                emit_measure = true;
+            }
+        }
+
+        if(emit_measure)
+        {
+            effect->EmitMeasure(
+                duration_us * 0.001,
+                total_duration);
+        }
+
+        const int frame_delay_us =
+            static_cast<int>(1000000.0 / fps);
+        const int remaining_us = frame_delay_us - duration_us;
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::microseconds(std::max(1000, remaining_us));
+
+        // Poll at 1 ms so SetEffectUnActive can join promptly without the
+        // unsynchronised map read used by the upstream implementation.
+        while(std::chrono::steady_clock::now() < deadline)
+        {
+            const auto remaining = deadline - std::chrono::steady_clock::now();
+            std::this_thread::sleep_for(
+                std::min(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        remaining),
+                    std::chrono::microseconds(1000)));
+
+            std::lock_guard<std::mutex> guard(lock);
+            if(EffectThreads.find(effect) == EffectThreads.end())
+            {
+                printf(
+                    "[OpenRGBEffectsPlugin] Effect %s thread ended\n",
+                    effect->EffectDetails.EffectName.c_str());
+                return;
+            }
+        }
+    }
+
+    printf(
+        "[OpenRGBEffectsPlugin] Effect %s thread ended\n",
+        effect->EffectDetails.EffectName.c_str());
+}
+
+bool EffectManager::HasActiveEffects()
+{
+    std::lock_guard<std::mutex> guard(lock);
+    return !ActiveEffects.empty();
+}
+
+void EffectManager::AddPreview(
+    RGBEffect* effect,
+    ControllerZone* preview)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    previews[effect] = preview;
+    NotifySelectionChanged(effect);
+}
+
+void EffectManager::RemovePreview(RGBEffect* effect)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    previews.erase(effect);
+    NotifySelectionChanged(effect);
+}
+
+void EffectManager::NotifySelectionChanged(RGBEffect* effect)
+{
+    std::vector<ControllerZone*> new_zones = effect_zones[effect];
+    const auto preview = previews.find(effect);
+    if(preview != previews.end())
+    {
+        new_zones.push_back(preview->second);
+    }
+    effect->OnControllerZonesListChanged(new_zones);
+}
