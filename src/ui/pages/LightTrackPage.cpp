@@ -285,21 +285,36 @@ LightTrackPage::LightTrackPage(
     timeline_editor->SetLaneRenamedCallback(
         [this](int lane_index, const QString& name)
         {
-            return backend.RenameLane(lane_index, name);
+            if(!backend.RenameLane(lane_index, name))
+            {
+                return false;
+            }
+            CommitHistorySnapshot();
+            return true;
         });
     timeline_editor->SetLaneHighlightedCallback(
         [this](int lane_index, bool highlighted)
         {
-            return backend.SetLaneHighlighted(
+            if(!backend.SetLaneHighlighted(
                 lane_index,
-                highlighted);
+                highlighted))
+            {
+                return false;
+            }
+            CommitHistorySnapshot();
+            return true;
         });
     timeline_editor->SetLaneDisabledCallback(
         [this](int lane_index, bool disabled)
         {
-            return backend.SetLaneDisabled(
+            if(!backend.SetLaneDisabled(
                 lane_index,
-                disabled);
+                disabled))
+            {
+                return false;
+            }
+            CommitHistorySnapshot();
+            return true;
         });
 
     QWidget* right_column = new QWidget(this);

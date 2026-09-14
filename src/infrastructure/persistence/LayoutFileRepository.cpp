@@ -19,6 +19,7 @@ namespace
 using json = nlohmann::json;
 using lighttrack::ClipId;
 using lighttrack::LayoutClipSnapshot;
+using lighttrack::LayoutLaneSnapshot;
 using lighttrack::LayoutSnapshot;
 
 constexpr int LIGHTTRACK_LAYOUT_VERSION = 1;
@@ -168,6 +169,41 @@ LayoutSnapshot DecodeLayout(
             snapshot.music.path).absoluteFilePath();
     }
 
+    // Lane settings are optional for compatibility with earlier version-1 files.
+    if(layout.contains("lanes"))
+    {
+        if(!layout["lanes"].is_array())
+        {
+            throw std::runtime_error("Invalid lane settings list");
+        }
+        snapshot.lanes.reserve(static_cast<int>(layout["lanes"].size()));
+        int lane_number = 0;
+        for(const json& entry : layout["lanes"])
+        {
+            ++lane_number;
+            if(!entry.is_object()
+                || !entry.contains("lane")
+                || !entry["lane"].is_object()
+                || !entry.contains("name")
+                || !entry["name"].is_string()
+                || !entry.contains("highlighted")
+                || !entry["highlighted"].is_boolean()
+                || !entry.contains("disabled")
+                || !entry["disabled"].is_boolean())
+            {
+                throw std::runtime_error(ToUtf8(
+                    QString("Lane settings %1 are invalid").arg(lane_number)));
+            }
+
+            snapshot.lanes.push_back({
+                SerializeOpaqueJson(entry["lane"]),
+                FromUtf8(entry["name"].get<std::string>()),
+                entry["highlighted"].get<bool>(),
+                entry["disabled"].get<bool>()
+            });
+        }
+    }
+
     if(!layout.contains("clips")
         || !layout["clips"].is_array())
     {
@@ -223,6 +259,24 @@ json EncodeLayout(const LayoutSnapshot& snapshot)
         {"durationMs", snapshot.music.duration_ms}
     };
     layout["clips"] = json::array();
+    layout["lanes"] = json::array();
+    for(const LayoutLaneSnapshot& entry : snapshot.lanes)
+    {
+        const json lane = ParseOpaqueJson(
+            entry.serialized_lane,
+            "Invalid serialized lane settings target");
+        if(!lane.is_object())
+        {
+            throw std::runtime_error("Invalid serialized lane settings target");
+        }
+
+        layout["lanes"].push_back({
+            {"lane", lane},
+            {"name", ToUtf8(entry.name)},
+            {"highlighted", entry.highlighted},
+            {"disabled", entry.disabled}
+        });
+    }
 
     std::set<quint64> used_ids;
     int clip_number = 0;

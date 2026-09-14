@@ -99,6 +99,26 @@ add_test(NAME lighttrack.plugin_api
 )
 set_tests_properties(lighttrack.plugin_api PROPERTIES TIMEOUT 30)
 
+add_executable(lighttrack_lane_persistence_tests LanePersistenceTests.cpp)
+target_include_directories(lighttrack_lane_persistence_tests PRIVATE
+  "${PROJECT_SOURCE_DIR}/src"
+  "${OPENRGB_DIR}"
+  "${OPENRGB_DIR}/RGBController"
+  "${OPENRGB_DIR}/dependencies/json"
+)
+target_link_libraries(lighttrack_lane_persistence_tests PRIVATE "Qt${QT_VERSION_MAJOR}::Widgets")
+add_dependencies(lighttrack_lane_persistence_tests LightTrackPlugin)
+if(MSVC)
+  target_compile_options(lighttrack_lane_persistence_tests PRIVATE /EHsc)
+endif()
+add_test(NAME lighttrack.lane_persistence
+  COMMAND ${CMAKE_COMMAND} -E env
+    "QT_QPA_PLATFORM=offscreen"
+    "PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Widgets>;$ENV{PATH}"
+    $<TARGET_FILE:lighttrack_lane_persistence_tests> $<TARGET_FILE:LightTrackPlugin>
+)
+set_tests_properties(lighttrack.lane_persistence PROPERTIES TIMEOUT 30)
+
 if(WIN32)
   add_test(
     NAME lighttrack.layout_file_repository

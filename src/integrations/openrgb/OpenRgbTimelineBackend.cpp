@@ -244,6 +244,20 @@ public:
             }
         }
 
+        color_router_.SetTargets(AllRuntimeZones());
+        RefreshOverrideOutput();
+        return CurrentDeviceSnapshot();
+    }
+
+    OpenRgbTimelineBackend::DeviceSnapshot CurrentDeviceSnapshot() const
+    {
+        OpenRgbTimelineBackend::DeviceSnapshot snapshot;
+        if(lanes_.isEmpty())
+        {
+            snapshot.empty_message = plugin_api_ == nullptr
+                ? QStringLiteral("OpenRGB plugin API unavailable")
+                : QStringLiteral("No devices");
+        }
         snapshot.lanes.reserve(lanes_.size());
         for(int index = 0; index < lanes_.size(); ++index)
         {
@@ -257,9 +271,64 @@ public:
                 lane.led_count
             });
         }
-        color_router_.SetTargets(AllRuntimeZones());
-        RefreshOverrideOutput();
         return snapshot;
+    }
+
+    QVector<LayoutLaneSnapshot> CaptureLaneStates() const
+    {
+        QVector<LayoutLaneSnapshot> states;
+        states.reserve(lanes_.size());
+        for(int index = 0; index < lanes_.size(); ++index)
+        {
+            const LaneEntry& lane = lanes_[index];
+            states.push_back({
+                SerializeLane(index),
+                lane.name,
+                lane.highlighted,
+                lane.disabled
+            });
+        }
+        return states;
+    }
+
+    OpenRgbTimelineBackend::DeviceSnapshot RestoreLaneStates(
+        const QVector<LayoutLaneSnapshot>& states,
+        QStringList& warnings)
+    {
+        // Resolve all targets before changing names used by legacy matching.
+        QVector<int> resolved_lanes;
+        resolved_lanes.reserve(states.size());
+        for(const LayoutLaneSnapshot& state : states)
+        {
+            const int index = ResolveLane(state.serialized_lane);
+            resolved_lanes.push_back(index);
+            if(index < 0)
+            {
+                warnings.push_back(QString(
+                    "Skipped settings for \"%1\": its device or zone is unavailable.")
+                    .arg(state.name));
+            }
+        }
+
+        for(int index = 0; index < states.size(); ++index)
+        {
+            if(resolved_lanes[index] < 0)
+            {
+                continue;
+            }
+            const LayoutLaneSnapshot& state = states[index];
+            LaneEntry& lane = lanes_[resolved_lanes[index]];
+            lane.name = state.name;
+            lane.highlighted = state.highlighted;
+            lane.disabled = state.disabled;
+            lane_states_[lane.state_key] = {
+                state.name,
+                state.highlighted,
+                state.disabled
+            };
+        }
+        RefreshOverrideOutput();
+        return CurrentDeviceSnapshot();
     }
 
     bool RenameLane(int lane_index, const QString& name)
@@ -1139,6 +1208,18 @@ OpenRgbTimelineBackend::DeviceSnapshot
 OpenRgbTimelineBackend::ReloadDevices()
 {
     return impl_->ReloadDevices();
+}
+
+QVector<LayoutLaneSnapshot> OpenRgbTimelineBackend::CaptureLaneStates() const
+{
+    return impl_->CaptureLaneStates();
+}
+
+OpenRgbTimelineBackend::DeviceSnapshot OpenRgbTimelineBackend::RestoreLaneStates(
+    const QVector<LayoutLaneSnapshot>& states,
+    QStringList& warnings)
+{
+    return impl_->RestoreLaneStates(states, warnings);
 }
 
 QByteArray OpenRgbTimelineBackend::SerializeLane(

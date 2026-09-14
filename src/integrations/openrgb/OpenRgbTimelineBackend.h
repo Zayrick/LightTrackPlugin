@@ -1,10 +1,11 @@
 #pragma once
 
-#include "core/TimelineTypes.h"
+#include "core/LayoutSnapshot.h"
 #include "core/effects/EffectDescriptor.h"
 
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <memory>
@@ -60,6 +61,10 @@ public:
         EffectDescriptor& descriptor) const;
 
     DeviceSnapshot ReloadDevices();
+    QVector<LayoutLaneSnapshot> CaptureLaneStates() const;
+    DeviceSnapshot RestoreLaneStates(
+        const QVector<LayoutLaneSnapshot>& states,
+        QStringList& warnings);
     QByteArray SerializeLane(int lane_index) const;
     int ResolveLane(const QByteArray& serialized_lane) const;
     bool RenameLane(

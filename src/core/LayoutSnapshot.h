@@ -22,6 +22,24 @@ struct LayoutMusicSnapshot
     }
 };
 
+struct LayoutLaneSnapshot
+{
+    QByteArray serialized_lane;
+    QString name;
+    bool highlighted = false;
+    bool disabled = false;
+
+    friend bool operator==(
+        const LayoutLaneSnapshot& left,
+        const LayoutLaneSnapshot& right)
+    {
+        return left.serialized_lane == right.serialized_lane
+            && left.name == right.name
+            && left.highlighted == right.highlighted
+            && left.disabled == right.disabled;
+    }
+};
+
 struct LayoutClipSnapshot
 {
     // Invalid means that this clip came from a legacy version-1 file that
@@ -51,12 +69,14 @@ struct LayoutSnapshot
 {
     LayoutMusicSnapshot music;
     QVector<LayoutClipSnapshot> clips;
+    QVector<LayoutLaneSnapshot> lanes;
 
     friend bool operator==(
         const LayoutSnapshot& left,
         const LayoutSnapshot& right)
     {
         if(!(left.music == right.music)
+            || left.lanes != right.lanes
             || left.clips.size() != right.clips.size())
         {
             return false;

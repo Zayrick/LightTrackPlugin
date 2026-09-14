@@ -198,6 +198,7 @@ LayoutSnapshot LightTrackPage::CaptureLayoutState()
     LayoutSnapshot layout;
     layout.music.path = music_path;
     layout.music.duration_ms = music_duration_ms;
+    layout.lanes = backend.CaptureLaneStates();
 
     const QVector<TimelineClip> clips =
         timeline_editor->PersistentTimelineClips();
@@ -431,8 +432,10 @@ bool LightTrackPage::ApplyLayoutState(
         }
 
         commit_started = true;
+        const OpenRgbTimelineBackend::DeviceSnapshot devices =
+            backend.RestoreLaneStates(layout.lanes, warnings);
         replacing_layout_effects = true;
-        timeline_editor->ClearTimelineClips();
+        timeline_editor->SetLanes(devices.lanes, devices.empty_message);
         replacing_layout_effects = false;
         timeline_editor->SetMinimumTimelineDuration(
             restored_timeline_duration_ms);

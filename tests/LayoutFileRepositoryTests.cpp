@@ -39,12 +39,16 @@ QByteArray MakeClip(
             "\"settings\":{\"Speed\":7}}");
 }
 
-QByteArray MakeLayout(const QByteArray& clips)
+QByteArray MakeLayout(
+    const QByteArray& clips,
+    const QByteArray& lanes = {})
 {
     return QByteArrayLiteral(
         "{\"format\":\"OpenRGB LightTrack Layout\","
         "\"version\":1,\"music\":{},\"clips\":")
         + clips
+        + (lanes.isEmpty() ? QByteArray()
+            : QByteArrayLiteral(",\"lanes\":") + lanes)
         + QByteArrayLiteral("}");
 }
 
@@ -53,6 +57,12 @@ lighttrack::LayoutSnapshot SentinelSnapshot()
     lighttrack::LayoutSnapshot snapshot;
     snapshot.music.path = QStringLiteral("sentinel-music.wav");
     snapshot.music.duration_ms = 4242;
+    snapshot.lanes.push_back({
+        QByteArrayLiteral("{\"fallbackIndex\":9}"),
+        QStringLiteral("Sentinel lane"),
+        true,
+        true
+    });
     snapshot.clips.push_back({
         lighttrack::ClipId(999),
         QStringLiteral("sentinel.effect"),
@@ -88,6 +98,16 @@ int main()
         QDir(temporary_directory.path()).filePath(
             QStringLiteral("music.wav"));
     original.music.duration_ms = 123456;
+    original.lanes = {
+        {QByteArrayLiteral("{\"fallbackIndex\":0}"),
+            QString::fromUtf8(u8"Desk \u706f"), true, false},
+        {QByteArrayLiteral("{\"fallbackIndex\":1}"),
+            QStringLiteral("Disabled zone without clips"), false, true},
+        {QByteArrayLiteral("{\"fallbackIndex\":2}"),
+            QStringLiteral("Segment"), true, true},
+        {QByteArrayLiteral("{\"fallbackIndex\":3}"),
+            QStringLiteral("Default zone"), false, false}
+    };
     original.clips.push_back({
         lighttrack::ClipId(41),
         QStringLiteral("effect.one"),
@@ -119,6 +139,22 @@ int main()
     CHECK(repository.Load(roundtrip_path, roundtrip, error));
     CHECK(roundtrip == original);
 
+    lighttrack::LayoutSnapshot lanes_only;
+    lanes_only.lanes = original.lanes;
+    CHECK(repository.Save(roundtrip_path, lanes_only, error));
+    CHECK(repository.Load(roundtrip_path, roundtrip, error));
+    CHECK(roundtrip == lanes_only);
+
+    lighttrack::LayoutSnapshot renamed = lanes_only;
+    renamed.lanes[0].name = QStringLiteral("Renamed");
+    CHECK(!(renamed == lanes_only));
+    lighttrack::LayoutSnapshot highlighted = lanes_only;
+    highlighted.lanes[1].highlighted = true;
+    CHECK(!(highlighted == lanes_only));
+    lighttrack::LayoutSnapshot disabled = lanes_only;
+    disabled.lanes[1].disabled = false;
+    CHECK(!(disabled == lanes_only));
+
     const QString legacy_path =
         QDir(temporary_directory.path()).filePath(
             QStringLiteral("legacy-v1.lighttrack"));
@@ -143,6 +179,7 @@ int main()
     lighttrack::LayoutSnapshot legacy;
     CHECK(repository.Load(legacy_path, legacy, error));
     CHECK(legacy.clips.size() == 1);
+    CHECK(legacy.lanes.isEmpty());
     CHECK(!legacy.clips[0].id.IsValid());
     CHECK(legacy.clips[0].effect_id
         == QStringLiteral("legacy.effect"));
@@ -175,7 +212,19 @@ int main()
             + MakeClip(
                 QByteArrayLiteral("8"),
                 QByteArrayLiteral("[]"))
-            + QByteArrayLiteral("]"))
+            + QByteArrayLiteral("]")),
+        MakeLayout(QByteArrayLiteral("[]"), QByteArrayLiteral("{}")),
+        MakeLayout(QByteArrayLiteral("[]"), QByteArrayLiteral("[null]")),
+        MakeLayout(QByteArrayLiteral("[]"), QByteArrayLiteral(
+            "[{\"lane\":[],\"name\":\"Zone\",\"highlighted\":true,\"disabled\":false}]")),
+        MakeLayout(QByteArrayLiteral("[]"), QByteArrayLiteral(
+            "[{\"lane\":{},\"name\":12,\"highlighted\":true,\"disabled\":false}]")),
+        MakeLayout(QByteArrayLiteral("[]"), QByteArrayLiteral(
+            "[{\"lane\":{},\"name\":\"Zone\",\"highlighted\":\"true\",\"disabled\":false}]")),
+        MakeLayout(QByteArrayLiteral("[]"), QByteArrayLiteral(
+            "[{\"lane\":{},\"name\":\"Zone\",\"highlighted\":true,\"disabled\":1}]")),
+        MakeLayout(QByteArrayLiteral("[]"), QByteArrayLiteral(
+            "[{\"lane\":{},\"name\":\"Zone\",\"highlighted\":true}]"))
     };
 
     const lighttrack::LayoutSnapshot sentinel =
@@ -204,6 +253,13 @@ int main()
         error));
     CHECK(missing_file_output == sentinel);
     CHECK(!error.isEmpty());
+
+    // A bad target must not replace an existing valid file.
+    lighttrack::LayoutSnapshot invalid_target = lanes_only;
+    invalid_target.lanes[0].serialized_lane = QByteArrayLiteral("[]");
+    CHECK(!repository.Save(roundtrip_path, invalid_target, error));
+    CHECK(repository.Load(roundtrip_path, roundtrip, error));
+    CHECK(roundtrip == lanes_only);
 
 #undef CHECK
     return 0;
