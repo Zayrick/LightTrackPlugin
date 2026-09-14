@@ -13,6 +13,20 @@
 
 namespace
 {
+class RecordingController final : public TestController
+{
+public:
+    using TestController::TestController;
+
+    void UpdateLEDs() override
+    {
+        frames.push_back(colors);
+        TestController::UpdateLEDs();
+    }
+
+    std::vector<std::vector<RGBColor>> frames;
+};
+
 class CountingEffect final : public RGBEffect
 {
 public:
@@ -127,8 +141,23 @@ int main(int argc, char** argv)
         {lighttrack::ClipId(2), 1, 1, {&output_zone}}
     });
 
+    const RGBColor white = ToRGBColor(255, 255, 255);
+    output.SetAllColors(white);
+    router.RefreshIdleOutput();
+    CHECK(output.updates == 0);
+    CHECK(output.colors[0] == white);
+
     router.StartOutput();
     CHECK(output.colors[0] == ColorUtils::OFF());
+    // Pre-roll keeps clearing outside writes, even before any clip starts.
+    for(int frame = 0; frame < 3; ++frame)
+    {
+        const unsigned int updates = output.updates;
+        output.SetAllColors(white);
+        router.RefreshIdleOutput();
+        CHECK(output.updates == updates + 1);
+        CHECK(output.colors == std::vector<RGBColor>(2, ColorUtils::OFF()));
+    }
 
     const std::vector<ControllerZone*> lower =
         router.LayerZones(lighttrack::ClipId(1));
@@ -142,6 +171,10 @@ int main(int argc, char** argv)
     router.SetLayerActive(lighttrack::ClipId(1), true);
     lower[0]->SetAllZoneLEDs(ToRGBColor(255, 0, 0), 100, 0, 0);
     lower[0]->controller->UpdateLEDs();
+    CHECK(output.colors[0] == ToRGBColor(255, 0, 0));
+    const unsigned int active_updates = output.updates;
+    router.RefreshIdleOutput();
+    CHECK(output.updates == active_updates);
     CHECK(output.colors[0] == ToRGBColor(255, 0, 0));
 
     router.SetLayerActive(lighttrack::ClipId(2), true);
@@ -160,7 +193,39 @@ int main(int argc, char** argv)
     CHECK(lower[0]->controller != upper[0]->controller);
     CHECK(lower[0]->controller->GetColor(0) == ToRGBColor(0, 255, 0));
     CHECK(upper[0]->controller->GetColor(0) == ToRGBColor(0, 0, 255));
+    // Ending the last clip must not stop black frames during the music tail.
+    for(int frame = 0; frame < 3; ++frame)
+    {
+        const unsigned int updates = output.updates;
+        output.SetAllColors(white);
+        router.RefreshIdleOutput();
+        CHECK(output.updates == updates + 1);
+        CHECK(output.colors == std::vector<RGBColor>(2, ColorUtils::OFF()));
+    }
+
+    // Pause/stop/end disables refreshes; a later playback can be clip-free.
+    router.StopOutput();
+    const unsigned int stopped_updates = output.updates;
+    output.SetAllColors(white);
+    for(int frame = 0; frame < 3; ++frame)
+    {
+        router.RefreshIdleOutput();
+    }
+    CHECK(output.updates == stopped_updates);
+    CHECK(output.colors == std::vector<RGBColor>(2, white));
+    router.ConfigureLayers({});
+    router.StartOutput();
+    const unsigned int resumed_updates = output.updates;
+    for(int frame = 0; frame < 3; ++frame)
+    {
+        router.RefreshIdleOutput();
+    }
+    CHECK(output.updates == resumed_updates + 3);
+    CHECK(output.colors == std::vector<RGBColor>(2, ColorUtils::OFF()));
     router.Reset();
+    const unsigned int reset_updates = output.updates;
+    router.RefreshIdleOutput();
+    CHECK(output.updates == reset_updates);
     CHECK(api.virtual_controllers.empty());
     CHECK(api.created == api.deleted);
 
@@ -176,14 +241,21 @@ int main(int argc, char** argv)
     part.start_idx = 1;
     part.leds_count = 2;
     setup.zones[0].segments.push_back(part);
+    segment tail = part;
+    tail.name = "Tail";
+    tail.start_idx = 3;
+    tail.leds_count = 1;
+    setup.zones[0].segments.push_back(tail);
     setup.zones.push_back(TestController::LinearSetup().zones[0]);
-    TestController segmented(std::move(setup));
+    RecordingController segmented(std::move(setup));
     ControllerZone segment_zone(&segmented, 0, false, 100, true, true, 0);
+    ControllerZone idle_segment(&segmented, 0, false, 100, true, true, 1);
     ControllerZone second_zone(&segmented, 1, false, 100, true, false);
-    router.SetTargets({&segment_zone, &second_zone});
+    router.SetTargets({&segment_zone, &idle_segment, &second_zone});
     router.ConfigureLayers({
         {lighttrack::ClipId(3), 0, 0, {&segment_zone, &second_zone}},
-        {lighttrack::ClipId(4), 1, 1, {&segment_zone}}
+        {lighttrack::ClipId(4), 2, 1, {&segment_zone}},
+        {lighttrack::ClipId(5), 1, 2, {&second_zone}}
     });
     const auto base = router.LayerZones(lighttrack::ClipId(3));
     const auto overlay = router.LayerZones(lighttrack::ClipId(4));
@@ -207,6 +279,52 @@ int main(int argc, char** argv)
     CHECK(segmented.colors[4] == ToRGBColor(0, 0, 255));
     router.SetLayerActive(lighttrack::ClipId(4), false);
     CHECK(segmented.colors[1] == ToRGBColor(255, 0, 0));
+
+    // Only the child segment plays; both parent lanes are empty. Every
+    // submitted frame must retain its color while idle siblings go black.
+    router.SetLayerActive(lighttrack::ClipId(3), false);
+    router.SetLayerActive(lighttrack::ClipId(4), true);
+    overlay[0]->SetAllZoneLEDs(ToRGBColor(0, 255, 0), 100, 0, 0);
+    overlay[0]->controller->UpdateLEDs();
+    segmented.colors[0] = white; // Outside all configured segments.
+    for(int frame = 0; frame < 3; ++frame)
+    {
+        idle_segment.SetAllZoneLEDs(white, 100, 0, 0);
+        second_zone.SetAllZoneLEDs(white, 100, 0, 0);
+        const std::size_t submitted = segmented.frames.size();
+        router.RefreshIdleOutput();
+        CHECK(segmented.frames.size() == submitted + 1);
+        CHECK(segmented.frames.back() == std::vector<RGBColor>({
+            white, ToRGBColor(0, 255, 0), ToRGBColor(0, 255, 0), 0, 0, 0}));
+    }
+
+    // The zone-level effect also survives idle segments on the same device.
+    router.SetLayerActive(lighttrack::ClipId(4), false);
+    router.SetLayerActive(lighttrack::ClipId(5), true);
+    const auto zone_effect = router.LayerZones(lighttrack::ClipId(5));
+    zone_effect[0]->SetAllZoneLEDs(ToRGBColor(0, 0, 255), 100, 0, 0);
+    zone_effect[0]->controller->UpdateLEDs();
+    for(int frame = 0; frame < 3; ++frame)
+    {
+        segment_zone.SetAllZoneLEDs(white, 100, 0, 0);
+        idle_segment.SetAllZoneLEDs(white, 100, 0, 0);
+        const std::size_t submitted = segmented.frames.size();
+        router.RefreshIdleOutput();
+        CHECK(segmented.frames.size() == submitted + 1);
+        CHECK(segmented.frames.back() == std::vector<RGBColor>({
+            white, 0, 0, 0, ToRGBColor(0, 0, 255), ToRGBColor(0, 0, 255)}));
+    }
+
+    // Highlight/disable overrides still take precedence over idle and effects.
+    router.SetOverrides({{&idle_segment, white}, {&second_zone, ColorUtils::OFF()}});
+    idle_segment.SetAllZoneLEDs(ColorUtils::OFF(), 100, 0, 0);
+    second_zone.SetAllZoneLEDs(white, 100, 0, 0);
+    router.RefreshIdleOutput();
+    CHECK(segmented.frames.back() == std::vector<RGBColor>({white, 0, 0, white, 0, 0}));
+    router.SetOverrides({});
+    router.RefreshIdleOutput();
+    CHECK(segmented.frames.back() == std::vector<RGBColor>({
+        white, 0, 0, 0, ToRGBColor(0, 0, 255), ToRGBColor(0, 0, 255)}));
     router.StopOutput();
     router.Reset();
     CHECK(api.virtual_controllers.empty());

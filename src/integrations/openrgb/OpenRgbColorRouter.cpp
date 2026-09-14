@@ -478,6 +478,30 @@ public:
         PublishAll(false);
     }
 
+    void RefreshIdleOutput()
+    {
+        if(!output_enabled_)
+        {
+            return;
+        }
+
+        // Targets are leaf zones/segments. Refresh only leaves without a
+        // visible effect; an empty device or parent zone lane must never
+        // clear an active child. PublishTargets batches the affected leaves
+        // into one controller update while preserving active leaf colors.
+        std::vector<ControllerZone*> idle_targets;
+        idle_targets.reserve(targets_.size());
+        for(const auto& target : targets_)
+        {
+            if(target.second.override_color.has_value()
+                || TopRoute(target.second) == nullptr)
+            {
+                idle_targets.push_back(target.first);
+            }
+        }
+        PublishTargets(idle_targets, false);
+    }
+
     void StopOutput()
     {
         for(auto& layer : layers_)
@@ -780,6 +804,13 @@ void OpenRgbColorRouter::StartOutput()
     std::lock_guard<std::mutex> frame_guard(
         ControllerFrameMutex());
     impl_->StartOutput();
+}
+
+void OpenRgbColorRouter::RefreshIdleOutput()
+{
+    std::lock_guard<std::mutex> frame_guard(
+        ControllerFrameMutex());
+    impl_->RefreshIdleOutput();
 }
 
 void OpenRgbColorRouter::StopOutput()

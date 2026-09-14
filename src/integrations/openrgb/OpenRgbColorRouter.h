@@ -47,6 +47,7 @@ public:
 
     void SetOverrides(std::vector<TargetOverride> overrides);
     void StartOutput();
+    void RefreshIdleOutput();
     void StopOutput();
     void Blackout();
 

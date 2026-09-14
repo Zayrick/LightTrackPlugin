@@ -9,6 +9,8 @@ LightTrackPlugin 是一个基于 Qt 的 OpenRGB 插件，用时间线组织灯�
 
 插件使用宿主 API 创建独立的虚拟控制器保存各片段的颜色，再按时间线图层优先级输出。构建所用 Qt 的主版本和架构应与 OpenRGB 宿主一致。
 
+播放期间，空闲区域会随播放同步持续补发黑色，直到暂停、停止或音乐结束。空闲判断以最小输出单元为准（有 segment 时为 segment，否则为 zone），保留活动区域的灯效与开灯/禁用状态，合并为设备帧后提交。
+
 ## 获取源码
 
 项目通过 Git 子模块引用 OpenRGB、OpenRGBEffectsPlugin 和 miniaudio。首次克隆时应同时初始化子模块：

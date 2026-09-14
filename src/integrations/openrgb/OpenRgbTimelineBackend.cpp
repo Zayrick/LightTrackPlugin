@@ -775,6 +775,9 @@ public:
             runtime_assignments_[active.first] = std::move(zones);
             manager->SetEffectActive(effect);
         }
+
+        // Playback sync continues through clip gaps until pause/stop/end.
+        color_router_.RefreshIdleOutput();
     }
 
 private:
