@@ -49,6 +49,7 @@ set_target_properties(lighttrack_openrgb_runtime_tests PROPERTIES
 
 add_executable(lighttrack_timeline_tests
   TimelineClipboardTests.cpp
+  TimelineDragTests.cpp
   "${PROJECT_SOURCE_DIR}/src/ui/UiHelpers.h"
   "${PROJECT_SOURCE_DIR}/src/ui/timeline/TimelineEditor.h"
   "${PROJECT_SOURCE_DIR}/src/ui/timeline/TimelineEditor.cpp"

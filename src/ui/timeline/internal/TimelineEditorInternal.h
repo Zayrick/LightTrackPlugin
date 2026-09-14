@@ -16,6 +16,7 @@
 #include <QPoint>
 #include <QPointF>
 #include <QRectF>
+#include <QSet>
 #include <QSize>
 #include <QString>
 #include <QTimer>
@@ -271,6 +272,8 @@ public:
 
 protected:
     void drawBackground(QPainter* painter, const QRectF& rect) override;
+    void drawForeground(QPainter* painter, const QRectF& rect) override;
+    void keyPressEvent(QKeyEvent* event) override;
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
@@ -282,7 +285,21 @@ private:
         ClipMove,
         ClipResizeLeft,
         ClipResizeRight,
+        BoxSelection,
         PlayheadSeek
+    };
+    enum ClipClickAction
+    {
+        KeepClipSelection,
+        SelectOnlyClickedClip,
+        DeselectClickedClip
+    };
+    struct ClipMoveStart
+    {
+        TimelineClipItem* clip;
+        qreal x;
+        int lane;
+        int visible_row;
     };
     template<typename ItemType>
     ItemType* Track(ItemType* item);
@@ -327,13 +344,14 @@ private:
         const TimelineClipItem* ignored_clip) const;
     qreal SnapDelta(
         const QVector<qreal>& moving_edges,
-        const TimelineClipItem* ignored_clip) const;
+        const QSet<const TimelineClipItem*>& ignored_clips) const;
     qreal MusicPixelWidth() const;
     void AddMusicItems();
     void UpdatePlayhead();
     bool IsPlayheadHandle(const QPointF& pos) const;
     void SeekMusicAt(qreal x);
-    void UpdateClipMove(const QPointF& pos);
+    void UpdateBoxSelection(const QPointF& pos, const QPoint& screen_pos);
+    void UpdateClipMove(const QPointF& pos, const QPoint& screen_pos);
     void UpdateClipResize(const QPointF& pos);
     void ShowPreview(
         int lane,
@@ -353,7 +371,7 @@ private:
     void RemoveClip(TimelineClipItem* clip);
     void NotifyClipSelected(TimelineClipItem* clip);
     void NotifyTimelineChanged();
-    void CancelDrag();
+    void CancelDrag(bool restore_positions = true);
     QHash<QString, EffectDescriptor> effects;
     QPalette palette;
     QSize viewport_size;
@@ -380,8 +398,15 @@ private:
     bool snapping_enabled = true;
     quint64 next_clip_id = 0;
     DragMode drag_mode = NoDrag;
-    QPointF drag_offset;
     QPointF drag_scene_start;
+    QPoint drag_screen_start;
+    QVector<ClipMoveStart> moving_clips;
+    QSet<const TimelineClipItem*> moving_clip_items;
+    ClipClickAction pending_clip_click = KeepClipSelection;
+    bool clip_move_started = false;
+    QRectF selection_rect;
+    QSet<TimelineClipItem*> selection_before_drag;
+    bool selection_box_visible = false;
     qreal clip_start_x = 0.0;
     qreal clip_start_width = CLIP_DEFAULT_WIDTH;
     int clip_start_lane = -1;

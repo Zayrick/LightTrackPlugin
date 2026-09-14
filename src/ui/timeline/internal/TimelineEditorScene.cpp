@@ -1,5 +1,6 @@
 #include "TimelineEditorInternal.h"
 
+#include <QApplication>
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QGraphicsEllipseItem>
@@ -8,6 +9,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QMimeData>
 #include <QPainter>
 #include <QPen>
@@ -559,19 +561,17 @@ bool LightTrackScene::PasteCopiedClips()
         qMax<qint64>(
             1,
             TimelineTickIntervalMs(pixels_per_second));
+    qint64 latest_end_ms = 0;
+    for(const ClipboardClip& copied_clip : payload->clips)
+    {
+        latest_end_ms = qMax(latest_end_ms, copied_clip.end_ms);
+    }
     const qint64 maximum_offset =
-        std::numeric_limits<qint64>::max();
+        std::numeric_limits<qint64>::max() - latest_end_ms;
     const qint64 paste_offset_ms =
         next_sequence > maximum_offset / paste_interval_ms
         ? maximum_offset
         : next_sequence * paste_interval_ms;
-    const qint64 maximum_timeline_ms =
-        qMax<qint64>(
-            1,
-            static_cast<qint64>(std::floor(
-                sceneRect().width()
-                * 1000.0
-                / pixels_per_second)));
 
     struct PendingPaste
     {
@@ -592,28 +592,14 @@ bool LightTrackScene::PasteCopiedClips()
             copied_clip.end_ms - copied_clip.start_ms;
         if(effect == nullptr
             || copied_clip.lane_index >= lanes.size()
-            || duration_ms <= 0
-            || duration_ms > maximum_timeline_ms)
+            || duration_ms <= 0)
         {
             continue;
         }
 
-        const qint64 latest_start_ms =
-            maximum_timeline_ms - duration_ms;
-        const qint64 desired_start_ms =
-            copied_clip.start_ms
-                > maximum_offset - paste_offset_ms
-            ? maximum_offset
-            : copied_clip.start_ms + paste_offset_ms;
-        qint64 start_ms = desired_start_ms;
-        if(start_ms > latest_start_ms)
-        {
-            start_ms =
-                copied_clip.start_ms >= paste_offset_ms
-                ? copied_clip.start_ms - paste_offset_ms
-                : latest_start_ms;
-        }
-        start_ms = qBound<qint64>(0, start_ms, latest_start_ms);
+        // Move the whole selection by the same amount. AddClip extends the
+        // timeline, so clips near its end keep their spacing and duration.
+        const qint64 start_ms = copied_clip.start_ms + paste_offset_ms;
         pending_clips.push_back({
             copied_clip.source_id,
             *effect,
@@ -671,6 +657,7 @@ bool LightTrackScene::PasteCopiedClips()
 
 bool LightTrackScene::DeleteSelectedClips()
 {
+    CancelDrag();
     QVector<TimelineClipItem*> selected_clips;
     for(TimelineClipItem* clip : clips)
     {
@@ -747,15 +734,55 @@ void LightTrackScene::drawBackground(QPainter* painter, const QRectF& rect)
     PaintInheritedClips(painter, rect);
 }
 
+void LightTrackScene::drawForeground(QPainter* painter, const QRectF&)
+{
+    if(drag_mode != BoxSelection || !selection_box_visible)
+    {
+        return;
+    }
+
+    painter->save();
+    const QColor highlight = palette.color(QPalette::Highlight);
+    QPen pen(highlight, 1.0);
+    pen.setCosmetic(true);
+    painter->setPen(pen);
+    painter->setBrush(WithAlpha(highlight, 45));
+    painter->drawRect(selection_rect);
+    painter->restore();
+}
+
+void LightTrackScene::keyPressEvent(QKeyEvent* event)
+{
+    if(event->key() == Qt::Key_Escape && drag_mode != NoDrag)
+    {
+        CancelDrag();
+        event->accept();
+        return;
+    }
+    QGraphicsScene::keyPressEvent(event);
+}
+
 void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
 {
+    if(event->button() == Qt::RightButton)
+    {
+        if(drag_mode == NoDrag)
+        {
+            SelectClipAt(event->scenePos());
+        }
+        event->accept();
+        return;
+    }
+
     if(event->button() != Qt::LeftButton)
     {
         QGraphicsScene::mousePressEvent(event);
         return;
     }
 
+    CancelDrag();
     const QPointF scene_pos = event->scenePos();
+    const bool control_pressed = event->modifiers() & Qt::ControlModifier;
     const bool is_music_row =
         music_duration_ms > 0
         && scene_pos.y() >= 0.0
@@ -773,24 +800,53 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
     TimelineClipItem* clip = ClipAt(scene_pos);
     if(clip == nullptr)
     {
-        clearSelection();
-        NotifyClipSelected(nullptr);
-        QGraphicsScene::mousePressEvent(event);
+        if(control_pressed)
+        {
+            for(TimelineClipItem* selected_clip : clips)
+            {
+                if(selected_clip->isSelected())
+                {
+                    selection_before_drag.insert(selected_clip);
+                }
+            }
+        }
+        else
+        {
+            clearSelection();
+            NotifyClipSelected(nullptr);
+        }
+        drag_mode = BoxSelection;
+        drag_scene_start = scene_pos;
+        drag_screen_start = event->screenPos();
+        event->accept();
         return;
+    }
+
+    if(control_pressed)
+    {
+        // Defer deselection until release so Ctrl+drag can move the group too.
+        pending_clip_click = clip->isSelected()
+            ? DeselectClickedClip : KeepClipSelection;
+        clip->setSelected(true);
+    }
+    else
+    {
+        pending_clip_click = SelectOnlyClickedClip;
+        if(!clip->isSelected())
+        {
+            clearSelection();
+            clip->setSelected(true);
+        }
     }
 
     const QPointF local_pos =
         clip->mapFromScene(scene_pos);
-    clearSelection();
-    clip->setSelected(true);
-    NotifyClipSelected(clip);
-
     active_clip = clip;
-    if(clip->IsLeftResizeHandle(local_pos))
+    if(!control_pressed && clip->IsLeftResizeHandle(local_pos))
     {
         drag_mode = ClipResizeLeft;
     }
-    else if(clip->IsRightResizeHandle(local_pos))
+    else if(!control_pressed && clip->IsRightResizeHandle(local_pos))
     {
         drag_mode = ClipResizeRight;
     }
@@ -799,31 +855,50 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
         drag_mode = ClipMove;
     }
 
-    drag_offset = local_pos;
     drag_scene_start = scene_pos;
+    drag_screen_start = event->screenPos();
     clip_start_x = clip->pos().x();
     clip_start_width = clip->ClipWidth();
     clip_start_lane = clip->LaneIndex();
-    active_clip->setOpacity(0.88);
-    active_clip->setZValue(80.0);
-
     if(drag_mode == ClipMove)
     {
-        UpdateClipMove(scene_pos);
+        for(TimelineClipItem* selected_clip : clips)
+        {
+            const int row = visible_lane_indices.indexOf(selected_clip->LaneIndex());
+            if(selected_clip->isSelected() && selected_clip->isVisible() && row >= 0)
+            {
+                moving_clips.push_back({selected_clip, selected_clip->pos().x(),
+                    selected_clip->LaneIndex(), row});
+                moving_clip_items.insert(selected_clip);
+            }
+        }
     }
     else
     {
+        // Edge handles continue to resize just the clicked clip.
+        clearSelection();
+        clip->setSelected(true);
+        active_clip->setOpacity(0.88);
+        active_clip->setZValue(80.0);
         UpdateClipResize(scene_pos);
     }
+    NotifyClipSelected(clip);
 
     event->accept();
 }
 
 void LightTrackScene::mouseMoveEvent(QGraphicsSceneMouseEvent* event)
 {
+    if(drag_mode == BoxSelection)
+    {
+        UpdateBoxSelection(event->scenePos(), event->screenPos());
+        event->accept();
+        return;
+    }
+
     if(drag_mode == ClipMove)
     {
-        UpdateClipMove(event->scenePos());
+        UpdateClipMove(event->scenePos(), event->screenPos());
         event->accept();
         return;
     }
@@ -848,6 +923,20 @@ void LightTrackScene::mouseMoveEvent(QGraphicsSceneMouseEvent* event)
 
 void LightTrackScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
 {
+    if(event->button() != Qt::LeftButton)
+    {
+        QGraphicsScene::mouseReleaseEvent(event);
+        return;
+    }
+
+    if(drag_mode == BoxSelection)
+    {
+        UpdateBoxSelection(event->scenePos(), event->screenPos());
+        CancelDrag();
+        event->accept();
+        return;
+    }
+
     if(drag_mode == PlayheadSeek)
     {
         drag_mode = NoDrag;
@@ -855,8 +944,49 @@ void LightTrackScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
         return;
     }
 
-    if(drag_mode == ClipMove
-        || drag_mode == ClipResizeLeft
+    if(drag_mode == ClipMove)
+    {
+        UpdateClipMove(event->scenePos(), event->screenPos());
+        bool changed = false;
+        for(const ClipMoveStart& start : moving_clips)
+        {
+            changed = changed || start.clip->LaneIndex() != start.lane
+                || !qFuzzyCompare(start.clip->pos().x() + 1.0, start.x + 1.0);
+        }
+
+        if(!clip_move_started && active_clip != nullptr)
+        {
+            if(pending_clip_click == SelectOnlyClickedClip)
+            {
+                clearSelection();
+                active_clip->setSelected(true);
+                NotifyClipSelected(active_clip);
+            }
+            else if(pending_clip_click == DeselectClickedClip)
+            {
+                active_clip->setSelected(false);
+                TimelineClipItem* selected_clip = nullptr;
+                for(TimelineClipItem* candidate : clips)
+                {
+                    if(candidate->isSelected())
+                    {
+                        selected_clip = candidate;
+                    }
+                }
+                NotifyClipSelected(selected_clip);
+            }
+        }
+
+        CancelDrag(false);
+        if(changed)
+        {
+            NotifyTimelineChanged();
+        }
+        event->accept();
+        return;
+    }
+
+    if(drag_mode == ClipResizeLeft
         || drag_mode == ClipResizeRight)
     {
         bool changed = false;
@@ -870,13 +1000,9 @@ void LightTrackScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
                 || !qFuzzyCompare(
                     active_clip->ClipWidth() + 1.0,
                     clip_start_width + 1.0);
-            active_clip->setOpacity(1.0);
-            active_clip->setZValue(35.0);
         }
 
-        HidePreview();
-        active_clip = nullptr;
-        drag_mode = NoDrag;
+        CancelDrag(false);
         if(changed)
         {
             NotifyTimelineChanged();
@@ -1319,19 +1445,19 @@ qreal LightTrackScene::SnapClipX(
 {
     return x + SnapDelta(
         {x, x + width},
-        ignored_clip);
+        {ignored_clip});
 }
 
 qreal LightTrackScene::SnapEdgeX(
     qreal x,
     const TimelineClipItem* ignored_clip) const
 {
-    return x + SnapDelta({x}, ignored_clip);
+    return x + SnapDelta({x}, {ignored_clip});
 }
 
 qreal LightTrackScene::SnapDelta(
     const QVector<qreal>& moving_edges,
-    const TimelineClipItem* ignored_clip) const
+    const QSet<const TimelineClipItem*>& ignored_clips) const
 {
     if(!snapping_enabled || moving_edges.empty())
     {
@@ -1357,7 +1483,7 @@ qreal LightTrackScene::SnapDelta(
 
     for(const TimelineClipItem* clip : clips)
     {
-        if(clip == ignored_clip || !clip->isVisible())
+        if(ignored_clips.contains(clip) || !clip->isVisible())
         {
             continue;
         }
@@ -1497,33 +1623,117 @@ void LightTrackScene::SeekMusicAt(qreal x)
     }
 }
 
-void LightTrackScene::UpdateClipMove(const QPointF& pos)
+void LightTrackScene::UpdateBoxSelection(
+    const QPointF& pos,
+    const QPoint& screen_pos)
 {
-    if(active_clip == nullptr)
+    if(!selection_box_visible
+        && (screen_pos - drag_screen_start).manhattanLength()
+            < QApplication::startDragDistance())
     {
         return;
     }
+
+    const QRectF previous_rect = selection_rect;
+    selection_rect = QRectF(drag_scene_start, pos).normalized()
+        .intersected(sceneRect());
+    selection_box_visible = true;
+    update(previous_rect.united(selection_rect).adjusted(-2.0, -2.0, 2.0, 2.0));
+
+    bool selection_changed = false;
+    TimelineClipItem* selected_clip = nullptr;
+    for(TimelineClipItem* clip : clips)
+    {
+        const bool selected = clip->isVisible()
+            && (selection_before_drag.contains(clip)
+                || selection_rect.intersects(clip->sceneBoundingRect()));
+        if(clip->isSelected() != selected)
+        {
+            clip->setSelected(selected);
+            selection_changed = true;
+        }
+        if(selected)
+        {
+            selected_clip = clip;
+        }
+    }
+
+    if(selection_changed)
+    {
+        NotifyClipSelected(selected_clip);
+    }
+}
+
+void LightTrackScene::UpdateClipMove(const QPointF& pos, const QPoint& screen_pos)
+{
+    if(active_clip == nullptr || moving_clips.empty())
+    {
+        return;
+    }
+
+    if(!clip_move_started)
+    {
+        if((screen_pos - drag_screen_start).manhattanLength()
+            < QApplication::startDragDistance())
+        {
+            return;
+        }
+        clip_move_started = true;
+        for(const ClipMoveStart& start : moving_clips)
+        {
+            start.clip->setOpacity(0.88);
+            start.clip->setZValue(80.0);
+        }
+        active_clip->setZValue(81.0);
+        active_clip->setCursor(Qt::ClosedHandCursor);
+    }
+
+    qreal leftmost_x = moving_clips.front().x;
+    int first_row = moving_clips.front().visible_row;
+    int last_row = first_row;
+    for(const ClipMoveStart& start : moving_clips)
+    {
+        leftmost_x = qMin(leftmost_x, start.x);
+        first_row = qMin(first_row, start.visible_row);
+        last_row = qMax(last_row, start.visible_row);
+    }
+
+    // Clamp and snap one common delta to preserve the entire arrangement.
+    qreal delta_x = qMax(-leftmost_x, pos.x() - drag_scene_start.x());
+    QVector<qreal> moving_edges;
+    moving_edges.reserve(moving_clips.size() * 2);
+    for(const ClipMoveStart& start : moving_clips)
+    {
+        moving_edges.push_back(start.x + delta_x);
+        moving_edges.push_back(start.x + delta_x + start.clip->ClipWidth());
+    }
+    delta_x = qMax(-leftmost_x,
+        delta_x + SnapDelta(moving_edges, moving_clip_items));
 
     const int target_lane = LaneAt(pos);
-    if(target_lane < 0)
-    {
-        HidePreview();
-        return;
-    }
+    const int target_row = target_lane >= 0
+        ? static_cast<int>(visible_lane_indices.indexOf(target_lane))
+        : (pos.y() < ROW_HEIGHT ? 0 : static_cast<int>(visible_lane_indices.size()) - 1);
+    const int active_start_row =
+        static_cast<int>(visible_lane_indices.indexOf(clip_start_lane));
+    const int row_delta = qBound(-first_row,
+        target_row - active_start_row,
+        static_cast<int>(visible_lane_indices.size()) - 1 - last_row);
 
-    const qreal width = active_clip->ClipWidth();
-    const qreal x = qMax<qreal>(
-        0.0,
-        SnapClipX(
-            pos.x() - drag_offset.x(),
-            width,
-            active_clip));
-    active_clip->SetLaneIndex(target_lane);
-    active_clip->setPos(x, ClipY(target_lane));
+    qreal rightmost_x = 0.0;
+    for(const ClipMoveStart& start : moving_clips)
+    {
+        const int lane = visible_lane_indices[start.visible_row + row_delta];
+        const qreal x = start.x + delta_x;
+        start.clip->SetLaneIndex(lane);
+        start.clip->setPos(x, ClipY(lane));
+        rightmost_x = qMax(rightmost_x, x + start.clip->boundingRect().width());
+    }
+    EnsureContentWidth(rightmost_x);
     ShowPreview(
-        target_lane,
-        x,
-        width,
+        active_clip->LaneIndex(),
+        active_clip->pos().x(),
+        active_clip->ClipWidth(),
         active_clip->Effect());
 }
 
@@ -1672,11 +1882,9 @@ qreal LightTrackScene::DefaultClipWidth() const
 
 void LightTrackScene::RemoveClip(TimelineClipItem* clip)
 {
-    if(active_clip == clip)
+    if(active_clip == clip || moving_clip_items.contains(clip))
     {
-        active_clip = nullptr;
-        HidePreview();
-        drag_mode = NoDrag;
+        CancelDrag();
     }
 
     clips.removeOne(clip);
@@ -1710,12 +1918,42 @@ void LightTrackScene::NotifyTimelineChanged()
     }
 }
 
-void LightTrackScene::CancelDrag()
+void LightTrackScene::CancelDrag(bool restore_positions)
 {
+    if(selection_box_visible)
+    {
+        update(selection_rect.adjusted(-2.0, -2.0, 2.0, 2.0));
+    }
+    selection_rect = QRectF();
+    selection_before_drag.clear();
+    selection_box_visible = false;
+
+    for(const ClipMoveStart& start : moving_clips)
+    {
+        if(restore_positions)
+        {
+            start.clip->SetLaneIndex(start.lane);
+            start.clip->setPos(start.x, ClipY(start.lane));
+        }
+        start.clip->setOpacity(1.0);
+        start.clip->setZValue(35.0);
+    }
+    moving_clips.clear();
+    moving_clip_items.clear();
+    pending_clip_click = KeepClipSelection;
+    clip_move_started = false;
+
     if(active_clip != nullptr)
     {
+        if(restore_positions
+            && (drag_mode == ClipResizeLeft || drag_mode == ClipResizeRight))
+        {
+            active_clip->SetClipWidth(clip_start_width);
+            active_clip->setPos(clip_start_x, ClipY(clip_start_lane));
+        }
         active_clip->setOpacity(1.0);
         active_clip->setZValue(35.0);
+        active_clip->setCursor(Qt::OpenHandCursor);
         active_clip = nullptr;
     }
 

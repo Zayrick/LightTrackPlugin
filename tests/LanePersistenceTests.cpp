@@ -11,6 +11,8 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QKeyEvent>
+#include <QMouseEvent>
 #include <QPluginLoader>
 #include <QPushButton>
 #include <QShortcut>
@@ -443,6 +445,66 @@ int main(int argc, char** argv)
     const QString music_reset_path = directory.filePath("music-reset.lighttrack");
     FileAction(page, "Save layout", music_reset_path);
     Require(ReadLayout(music_reset_path) == empty_layout, "New must clear the persisted music selection");
+
+    // A group move keeps both settings pages intact and is one undoable edit.
+    AddClip(page);
+    QGraphicsView* timeline_view = page->findChild<QGraphicsView*>();
+    Require(timeline_view != nullptr, "Missing timeline view for group drag");
+    const auto send_key = [timeline_view](int key)
+    {
+        QKeyEvent event(QEvent::KeyPress, key, Qt::ControlModifier);
+        QApplication::sendEvent(timeline_view, &event);
+    };
+    send_key(Qt::Key_C);
+    send_key(Qt::Key_V);
+    const auto mouse = [timeline_view](QEvent::Type type, const QPointF& scene_pos)
+    {
+        const QPoint local = timeline_view->mapFromScene(scene_pos);
+        QMouseEvent event(type, QPointF(local), QPointF(local),
+            QPointF(timeline_view->viewport()->mapToGlobal(local)),
+            type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+            type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+            Qt::NoModifier);
+        QApplication::sendEvent(timeline_view->viewport(), &event);
+    };
+    mouse(QEvent::MouseButtonPress, QPointF(100, 37));
+    mouse(QEvent::MouseMove, QPointF(550, 71));
+    mouse(QEvent::MouseButtonRelease, QPointF(550, 71));
+    Require(timeline_view->scene()->selectedItems().size() == 2,
+        "Could not select both clips before group drag");
+    const QString before_drag_path = directory.filePath("before-drag.lighttrack");
+    FileAction(page, "Save layout", before_drag_path);
+    const json before_drag = ReadLayout(before_drag_path);
+    Require(before_drag.at("clips").size() == 2, "Group drag fixture must contain two clips");
+    mouse(QEvent::MouseButtonPress, QPointF(220, 54));
+    mouse(QEvent::MouseMove, QPointF(260, 54));
+    mouse(QEvent::MouseMove, QPointF(300, 54));
+    mouse(QEvent::MouseButtonRelease, QPointF(300, 54));
+    Require(timeline_view->scene()->selectedItems().size() == 2,
+        "Group drag did not retain both selected clips");
+    const QString after_drag_path = directory.filePath("after-drag.lighttrack");
+    FileAction(page, "Save layout", after_drag_path);
+    const json after_drag = ReadLayout(after_drag_path);
+    const auto offset = after_drag.at("clips").at(0).at("startMs").get<qint64>()
+        - before_drag.at("clips").at(0).at("startMs").get<qint64>();
+    Require(offset > 0, "Group drag did not move the first clip");
+    json expected_drag = before_drag;
+    for(json& clip : expected_drag.at("clips"))
+    {
+        clip["startMs"] = clip.at("startMs").get<qint64>() + offset;
+        clip["endMs"] = clip.at("endMs").get<qint64>() + offset;
+    }
+    Require(after_drag == expected_drag, "Group drag changed spacing, IDs, or effect settings");
+    Button(page, "Undo")->click();
+    const QString undone_drag_path = directory.filePath("undone-drag.lighttrack");
+    FileAction(page, "Save layout", undone_drag_path);
+    Require(ReadLayout(undone_drag_path) == before_drag,
+        "One Undo must restore every clip in a group drag");
+    Button(page, "Redo")->click();
+    const QString redone_drag_path = directory.filePath("redone-drag.lighttrack");
+    FileAction(page, "Save layout", redone_drag_path);
+    Require(ReadLayout(redone_drag_path) == after_drag,
+        "One Redo must restore the whole group move");
 
     plugin->Unload();
     Require(api.virtual_controllers.empty(), "Lane persistence test leaked virtual controllers");
