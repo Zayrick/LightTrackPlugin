@@ -177,6 +177,99 @@ int main(int argc, char** argv)
         Qt::NoButton);
     CHECK(seek_positions.size() == 2);
 
+    // Short clips keep their duration through zoom, restore and clipboard use.
+    scene.ClearTimelineClips();
+    scene.SetSnappingEnabled(false);
+    CHECK(scene.RestoreClip(
+        QStringLiteral("rainbow"), 0, 1000, 1001, ClipId(100)).IsValid());
+    for(qreal zoom : {40.0, 240.0, 100.0})
+    {
+        CHECK(scene.SetPixelsPerSecond(zoom));
+        const auto clips = scene.PersistentTimelineClips();
+        CHECK(clips.size() == 1);
+        CHECK(clips[0].start_ms == 1000);
+        CHECK(clips[0].end_ms == 1001);
+    }
+    CHECK(scene.SelectClipAt(QPointF(103.0, 54.0)));
+    CHECK(scene.CopySelectedClips());
+    CHECK(scene.PasteCopiedClips());
+    const auto short_paste = scene.PersistentTimelineClips();
+    CHECK(short_paste.size() == 2);
+    CHECK(short_paste[1].end_ms - short_paste[1].start_ms == 1);
+
+    const auto drag_clip =
+        [&send_mouse_event](qreal from_x, qreal to_x)
+        {
+            send_mouse_event(
+                QEvent::GraphicsSceneMousePress,
+                QPointF(from_x, 54.0),
+                Qt::LeftButton,
+                Qt::LeftButton);
+            send_mouse_event(
+                QEvent::GraphicsSceneMouseMove,
+                QPointF(to_x, 54.0),
+                Qt::NoButton,
+                Qt::LeftButton);
+            send_mouse_event(
+                QEvent::GraphicsSceneMouseRelease,
+                QPointF(to_x, 54.0),
+                Qt::LeftButton,
+                Qt::NoButton);
+            QCoreApplication::processEvents();
+        };
+
+    scene.ClearTimelineClips();
+    CHECK(scene.RestoreClip(
+        QStringLiteral("rainbow"), 0, 1000, 3000, ClipId(101)).IsValid());
+    drag_clip(299.0, 104.0);
+    auto resized = scene.PersistentTimelineClips();
+    CHECK(resized.size() == 1);
+    CHECK(resized[0].start_ms == 1000);
+    CHECK(resized[0].end_ms == 1050);
+
+    // The center and both edges remain reachable on a narrow card.
+    drag_clip(103.0, 153.0);
+    resized = scene.PersistentTimelineClips();
+    CHECK(resized[0].start_ms == 1500);
+    CHECK(resized[0].end_ms == 1550);
+    drag_clip(150.5, 154.5);
+    resized = scene.PersistentTimelineClips();
+    CHECK(resized[0].start_ms == 1540);
+    CHECK(resized[0].end_ms == 1550);
+    drag_clip(159.0, 149.0);
+    resized = scene.PersistentTimelineClips();
+    CHECK(resized[0].start_ms == 1540);
+    CHECK(resized[0].end_ms == 1541);
+
+    // Dragging beyond the old right boundary extends the timeline immediately.
+    const qreal old_content_width = scene.ContentWidth();
+    drag_clip(159.0, 1159.0);
+    resized = scene.PersistentTimelineClips();
+    CHECK(resized[0].start_ms == 1540);
+    CHECK(resized[0].end_ms == 11541);
+    CHECK(scene.ContentWidth() > old_content_width);
+    CHECK(scene.ContentWidth() > 1154.1);
+    // The playhead at 5s must not block the clip underneath it.
+    drag_clip(500.0, 2000.0);
+    resized = scene.PersistentTimelineClips();
+    CHECK(resized[0].start_ms == 16540);
+    CHECK(resized[0].end_ms == 26541);
+    CHECK(scene.ContentWidth() > 2654.1);
+
+    // Restoring a long clip into a smaller viewport must not move its start.
+    scene.ClearTimelineClips();
+    scene.SetViewportSize(QSize(700, 144));
+    CHECK(scene.RestoreClip(
+        QStringLiteral("rainbow"), 0, 40000, 70000, ClipId(102)).IsValid());
+    CHECK(scene.SetPixelsPerSecond(40.0));
+    CHECK(scene.SetPixelsPerSecond(100.0));
+    scene.SetViewportSize(QSize(600, 144));
+    const auto restored_long = scene.PersistentTimelineClips();
+    CHECK(restored_long.size() == 1);
+    CHECK(restored_long[0].start_ms == 40000);
+    CHECK(restored_long[0].end_ms == 70000);
+    CHECK(scene.ContentWidth() > 7000.0);
+
 #undef CHECK
     return 0;
 }

@@ -56,7 +56,8 @@ inline constexpr const char* CLIP_MIME =
 inline constexpr qreal ROW_HEIGHT = 36.0;
 inline constexpr qreal EFFECT_ROW_HEIGHT = 28.0;
 inline constexpr qreal CLIP_HEIGHT = 32.0;
-inline constexpr qreal CLIP_MIN_WIDTH = 72.0;
+inline constexpr qint64 CLIP_MIN_DURATION_MS = 1;
+inline constexpr qreal CLIP_MIN_DISPLAY_WIDTH = 6.0;
 inline constexpr qreal CLIP_DEFAULT_WIDTH = 130.0;
 inline constexpr qreal TIMELINE_TICK_TARGET_WIDTH = 90.0;
 inline constexpr qreal RESIZE_HANDLE_WIDTH = 9.0;
@@ -292,6 +293,7 @@ private:
     void ClearLayoutItems();
     void ClearClips();
     void RebuildLayout();
+    void EnsureContentWidth(qreal right);
     void RefreshInheritedClips();
     void PaintRow(
         QPainter* painter,
@@ -316,7 +318,6 @@ private:
     TimelineClipItem* ClipAt(const QPointF& pos) const;
     int LaneAt(const QPointF& pos) const;
     qreal ClipY(int lane) const;
-    qreal ClampClipX(int lane, qreal x, qreal width) const;
     qreal SnapClipX(
         qreal x,
         qreal width,

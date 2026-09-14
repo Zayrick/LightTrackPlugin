@@ -51,6 +51,12 @@ LightTrackView::LightTrackView(QWidget* parent) :
     page_turn_animation->setEasingCurve(QEasingCurve::InOutCubic);
 
     connect(
+        light_scene,
+        &QGraphicsScene::sceneRectChanged,
+        this,
+        [this](const QRectF&) { SyncRuler(); });
+
+    connect(
         horizontalScrollBar(),
         &QScrollBar::valueChanged,
         this,

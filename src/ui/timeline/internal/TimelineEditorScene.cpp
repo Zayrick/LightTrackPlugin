@@ -340,9 +340,8 @@ ClipId LightTrackScene::RestoreClip(
     }
 
     const qreal x = start_ms * pixels_per_second / 1000.0;
-    const qreal width = qMax(
-        CLIP_MIN_WIDTH,
-        (end_ms - start_ms) * pixels_per_second / 1000.0);
+    const qreal width =
+        (end_ms - start_ms) * pixels_per_second / 1000.0;
     TimelineClipItem* clip =
         AddClip(*effect, lane, x, width, false, false, requested_id);
     return clip == nullptr ? ClipId{} : clip->Id();
@@ -415,13 +414,12 @@ bool LightTrackScene::PreviewEffectAt(const QString& effect_id, const QPointF& p
 
     const qreal clip_width = DefaultClipWidth();
     const qreal x =
-        ClampClipX(
-            lane,
+        qMax<qreal>(
+            0.0,
             SnapClipX(
                 pos.x() - clip_width / 2.0,
                 clip_width,
-                nullptr),
-            clip_width);
+                nullptr));
     ShowPreview(lane, x, clip_width, *effect);
     return true;
 }
@@ -621,9 +619,7 @@ bool LightTrackScene::PasteCopiedClips()
             *effect,
             copied_clip.lane_index,
             start_ms * pixels_per_second / 1000.0,
-            qMax(
-                CLIP_MIN_WIDTH,
-                duration_ms * pixels_per_second / 1000.0)
+            duration_ms * pixels_per_second / 1000.0
         });
     }
 
@@ -1029,11 +1025,18 @@ void LightTrackScene::RebuildLayout()
         ROW_HEIGHT + lane_count * ROW_HEIGHT;
     const qreal minimum_content_width =
         minimum_content_duration_ms * pixels_per_second / 1000.0;
-    const qreal scene_width = qMax(
+    qreal scene_width = qMax(
         qMax(
             qMax<qreal>(TIMELINE_MIN_WIDTH, viewport_size.width()),
             MusicPixelWidth()),
         minimum_content_width);
+    for(const TimelineClipItem* clip : clips)
+    {
+        scene_width = qMax(
+            scene_width,
+            clip->pos().x() + clip->boundingRect().width()
+                + pixels_per_second);
+    }
     const qreal scene_height =
         qMax<qreal>(content_height, viewport_size.height());
 
@@ -1060,6 +1063,22 @@ void LightTrackScene::RebuildLayout()
     invalidate(sceneRect(), QGraphicsScene::BackgroundLayer);
     AddMusicItems();
     RelayoutClips();
+}
+
+void LightTrackScene::EnsureContentWidth(qreal right)
+{
+    const qreal width = right + pixels_per_second;
+    if(width <= sceneRect().width())
+    {
+        return;
+    }
+
+    for(int lane : visible_lane_indices)
+    {
+        lanes[lane].rect.setRight(width);
+    }
+    setSceneRect(0.0, 0.0, width, sceneRect().height());
+    RefreshInheritedClips();
 }
 
 void LightTrackScene::RefreshInheritedClips()
@@ -1136,10 +1155,7 @@ void LightTrackScene::RelayoutClips()
         }
 
         clip->setVisible(true);
-        const qreal x = ClampClipX(
-            lane,
-            clip->pos().x(),
-            clip->ClipWidth());
+        const qreal x = qMax<qreal>(0.0, clip->pos().x());
         clip->setPos(x, ClipY(lane));
     }
 
@@ -1176,7 +1192,8 @@ void LightTrackScene::PaintGhostClip(
     const EffectDescriptor& effect,
     bool preview_ghost) const
 {
-    const QRectF ghost_rect(x, ClipY(lane), width, CLIP_HEIGHT);
+    const QRectF ghost_rect(
+        x, ClipY(lane), qMax(CLIP_MIN_DISPLAY_WIDTH, width), CLIP_HEIGHT);
     if(!ghost_rect.intersects(exposed))
     {
         return;
@@ -1198,13 +1215,16 @@ void LightTrackScene::PaintGhostClip(
     painter->setFont(font);
     painter->setPen(
         WithAlpha(Qt::white, preview_ghost ? 88 : 110));
-    painter->drawText(
-        ghost_rect.adjusted(9.0, 0.0, -9.0, 0.0),
-        Qt::AlignVCenter | Qt::AlignLeft,
-        QFontMetrics(font).elidedText(
-            effect.name,
-            Qt::ElideRight,
-            static_cast<int>(ghost_rect.width() - 18.0)));
+    const int text_width =
+        static_cast<int>(ghost_rect.width() - 18.0);
+    if(text_width > 0)
+    {
+        painter->drawText(
+            ghost_rect.adjusted(9.0, 0.0, -9.0, 0.0),
+            Qt::AlignVCenter | Qt::AlignLeft,
+            QFontMetrics(font).elidedText(
+                effect.name, Qt::ElideRight, text_width));
+    }
 }
 
 void LightTrackScene::PaintInheritedClips(
@@ -1261,15 +1281,24 @@ void LightTrackScene::PaintInheritedClips(
 
 TimelineClipItem* LightTrackScene::ClipAt(const QPointF& pos) const
 {
-    return dynamic_cast<TimelineClipItem*>(
-        itemAt(pos, QTransform()));
+    for(QGraphicsItem* item : items(pos))
+    {
+        if(auto* clip = dynamic_cast<TimelineClipItem*>(item))
+        {
+            return clip;
+        }
+    }
+    return nullptr;
 }
 
 int LightTrackScene::LaneAt(const QPointF& pos) const
 {
     for(int i = 0; i < lanes.size(); i++)
     {
-        if(lanes[i].rect.contains(pos))
+        const QRectF& rect = lanes[i].rect;
+        if(rect.isValid()
+            && pos.y() >= rect.top()
+            && pos.y() < rect.bottom())
         {
             return i;
         }
@@ -1281,12 +1310,6 @@ qreal LightTrackScene::ClipY(int lane) const
 {
     return lanes[lane].rect.top()
         + (lanes[lane].rect.height() - CLIP_HEIGHT) / 2.0;
-}
-
-qreal LightTrackScene::ClampClipX(int lane, qreal x, qreal width) const
-{
-    const QRectF rect = lanes[lane].rect;
-    return qBound(rect.left(), x, rect.right() - width);
 }
 
 qreal LightTrackScene::SnapClipX(
@@ -1489,13 +1512,12 @@ void LightTrackScene::UpdateClipMove(const QPointF& pos)
     }
 
     const qreal width = active_clip->ClipWidth();
-    const qreal x = ClampClipX(
-        target_lane,
+    const qreal x = qMax<qreal>(
+        0.0,
         SnapClipX(
             pos.x() - drag_offset.x(),
             width,
-            active_clip),
-        width);
+            active_clip));
     active_clip->SetLaneIndex(target_lane);
     active_clip->setPos(x, ClipY(target_lane));
     ShowPreview(
@@ -1513,6 +1535,8 @@ void LightTrackScene::UpdateClipResize(const QPointF& pos)
     }
 
     const int lane = active_clip->LaneIndex();
+    const qreal minimum_width =
+        CLIP_MIN_DURATION_MS * pixels_per_second / 1000.0;
     qreal x = clip_start_x;
     qreal width = clip_start_width;
 
@@ -1522,28 +1546,26 @@ void LightTrackScene::UpdateClipResize(const QPointF& pos)
         const qreal unsnapped_x = qBound(
             lanes[lane].rect.left(),
             clip_start_x + pos.x() - drag_scene_start.x(),
-            right - CLIP_MIN_WIDTH);
+            right - minimum_width);
         x = qBound(
             lanes[lane].rect.left(),
             SnapEdgeX(unsnapped_x, active_clip),
-            right - CLIP_MIN_WIDTH);
+            right - minimum_width);
         width = right - x;
     }
     else
     {
         const qreal minimum_right =
-            clip_start_x + CLIP_MIN_WIDTH;
-        const qreal unsnapped_right = qBound(
+            clip_start_x + minimum_width;
+        const qreal unsnapped_right = qMax(
             minimum_right,
             clip_start_x
                 + clip_start_width
                 + pos.x()
-                - drag_scene_start.x(),
-            lanes[lane].rect.right());
-        const qreal right = qBound(
+                - drag_scene_start.x());
+        const qreal right = qMax(
             minimum_right,
-            SnapEdgeX(unsnapped_right, active_clip),
-            lanes[lane].rect.right());
+            SnapEdgeX(unsnapped_right, active_clip));
         width = right - clip_start_x;
     }
 
@@ -1571,6 +1593,7 @@ void LightTrackScene::ShowPreview(
     last_preview_x = x;
     last_preview_width = width;
     last_preview_effect = effect;
+    EnsureContentWidth(x + qMax(CLIP_MIN_DISPLAY_WIDTH, width));
     RefreshInheritedClips();
 }
 
@@ -1615,7 +1638,7 @@ TimelineClipItem* LightTrackScene::AddClip(
         && !lanes[lane].rect.isEmpty())
     {
         clip->setPos(
-            ClampClipX(lane, x, width),
+            qMax<qreal>(0.0, x),
             ClipY(lane));
     }
     else
@@ -1625,6 +1648,7 @@ TimelineClipItem* LightTrackScene::AddClip(
     }
     addItem(clip);
     clips.push_back(clip);
+    EnsureContentWidth(clip->pos().x() + clip->boundingRect().width());
 
     if(select)
     {
@@ -1643,9 +1667,7 @@ TimelineClipItem* LightTrackScene::AddClip(
 
 qreal LightTrackScene::DefaultClipWidth() const
 {
-    return qMax(
-        CLIP_MIN_WIDTH,
-        CLIP_DEFAULT_WIDTH * pixels_per_second / GRID_WIDTH);
+    return CLIP_DEFAULT_WIDTH * pixels_per_second / GRID_WIDTH;
 }
 
 void LightTrackScene::RemoveClip(TimelineClipItem* clip)

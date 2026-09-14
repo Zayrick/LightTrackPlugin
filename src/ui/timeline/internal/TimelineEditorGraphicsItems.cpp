@@ -15,7 +15,8 @@ ClipPreviewItem::ClipPreviewItem()
 
 QRectF ClipPreviewItem::boundingRect() const
 {
-    return QRectF(0.0, 0.0, width, CLIP_HEIGHT)
+    return QRectF(
+        0.0, 0.0, qMax(CLIP_MIN_DISPLAY_WIDTH, width), CLIP_HEIGHT)
         .adjusted(-1.0, -1.0, 1.0, 1.0);
 }
 
@@ -34,7 +35,8 @@ void ClipPreviewItem::paint(
 {
     PaintClipCard(
         painter,
-        QRectF(0.0, 0.0, width, CLIP_HEIGHT),
+        QRectF(
+            0.0, 0.0, qMax(CLIP_MIN_DISPLAY_WIDTH, width), CLIP_HEIGHT),
         effect,
         true);
 }
@@ -105,7 +107,9 @@ TimelineClipItem::TimelineClipItem(ClipId id, const EffectDescriptor& effect) :
 
 QRectF TimelineClipItem::boundingRect() const
 {
-    return QRectF(0.0, 0.0, width, CLIP_HEIGHT);
+    // Keep very short clips reachable without changing their timeline duration.
+    return QRectF(
+        0.0, 0.0, qMax(CLIP_MIN_DISPLAY_WIDTH, width), CLIP_HEIGHT);
 }
 
 void TimelineClipItem::paint(
@@ -159,7 +163,7 @@ qreal TimelineClipItem::ClipWidth() const
 void TimelineClipItem::SetClipWidth(qreal clip_width)
 {
     prepareGeometryChange();
-    width = qMax(CLIP_MIN_WIDTH, clip_width);
+    width = clip_width;
     update();
 }
 
@@ -170,11 +174,16 @@ bool TimelineClipItem::IsResizeHandle(const QPointF& pos) const
 
 bool TimelineClipItem::IsLeftResizeHandle(const QPointF& pos) const
 {
-    return pos.x() <= RESIZE_HANDLE_WIDTH;
+    const qreal handle_width =
+        qMin(RESIZE_HANDLE_WIDTH, boundingRect().width() / 3.0);
+    return pos.x() <= handle_width;
 }
 
 bool TimelineClipItem::IsRightResizeHandle(const QPointF& pos) const
 {
-    return pos.x() >= width - RESIZE_HANDLE_WIDTH;
+    const qreal display_width = boundingRect().width();
+    const qreal handle_width =
+        qMin(RESIZE_HANDLE_WIDTH, display_width / 3.0);
+    return pos.x() >= display_width - handle_width;
 }
 }

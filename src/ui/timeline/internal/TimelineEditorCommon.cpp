@@ -111,10 +111,13 @@ void PaintClipCard(
     const QRectF text_rect = card_rect.adjusted(9.0, 0.0, -9.0, 0.0);
     const int text_width =
         qMax(0, static_cast<int>(std::floor(text_rect.width())));
-    painter->drawText(
-        text_rect,
-        Qt::AlignVCenter | Qt::AlignLeft,
-        QFontMetrics(font).elidedText(effect.name, Qt::ElideRight, text_width));
+    if(text_width > 0)
+    {
+        painter->drawText(
+            text_rect,
+            Qt::AlignVCenter | Qt::AlignLeft,
+            QFontMetrics(font).elidedText(effect.name, Qt::ElideRight, text_width));
+    }
     painter->restore();
 }
 
