@@ -193,8 +193,8 @@ LightTrackPage::LightTrackPage(
         ToolbarButton(0xE12E, toolbar_playback_group);
     toolbar_stop_button =
         ToolbarButton(0xE167, toolbar_playback_group);
-    toolbar_play_button->setToolTip("Play");
-    toolbar_pause_button->setToolTip("Pause");
+    toolbar_play_button->setToolTip("Play (Space)");
+    toolbar_pause_button->setToolTip("Pause (Space)");
     toolbar_stop_button->setToolTip("Stop");
     toolbar_play_button->setAccessibleName("Play");
     toolbar_pause_button->setAccessibleName("Pause");
@@ -414,6 +414,27 @@ LightTrackPage::LightTrackPage(
         &QTimer::timeout,
         this,
         [this]() { CommitHistorySnapshot(); });
+
+    QShortcut* playback_shortcut =
+        new QShortcut(QKeySequence(Qt::Key_Space), this);
+    playback_shortcut->setContext(
+        Qt::WidgetWithChildrenShortcut);
+    playback_shortcut->setAutoRepeat(false);
+    connect(
+        playback_shortcut,
+        &QShortcut::activated,
+        this,
+        [this]()
+        {
+            if(music_playing)
+            {
+                PauseMusic();
+            }
+            else
+            {
+                PlayMusic();
+            }
+        });
 
     QShortcut* undo_shortcut =
         new QShortcut(QKeySequence::Undo, this);
