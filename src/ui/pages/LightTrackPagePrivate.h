@@ -25,7 +25,7 @@ namespace lighttrack
 class TimelineEditor;
 }
 
-class ResourceManagerInterface;
+class OpenRGBPluginAPIInterface;
 
 namespace lighttrack::ui::page_detail
 {
@@ -56,7 +56,7 @@ class LightTrackPage final : public QWidget
 {
 public:
     LightTrackPage(
-        ResourceManagerInterface* resource_manager,
+        OpenRGBPluginAPIInterface* plugin_api,
         QWidget* parent = nullptr);
     ~LightTrackPage() override;
 
@@ -65,6 +65,7 @@ public:
 
     void ReloadDevices();
     void PrepareForDeviceReload();
+    void PauseForProfileLoad();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

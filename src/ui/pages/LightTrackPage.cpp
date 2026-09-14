@@ -47,10 +47,10 @@ namespace lighttrack::ui
 using namespace page_detail;
 
 LightTrackPage::LightTrackPage(
-    ResourceManagerInterface* resource_manager,
+    OpenRGBPluginAPIInterface* plugin_api,
     QWidget* parent) :
     QWidget(parent),
-    backend(resource_manager)
+    backend(plugin_api)
 {
     QVBoxLayout* page_layout = new QVBoxLayout(this);
     page_layout->setContentsMargins(
@@ -501,9 +501,9 @@ LightTrackPage::~LightTrackPage()
 }
 
 QWidget* CreateLightTrackPage(
-    ResourceManagerInterface* resource_manager)
+    OpenRGBPluginAPIInterface* plugin_api)
 {
-    return new LightTrackPage(resource_manager);
+    return new LightTrackPage(plugin_api);
 }
 
 void ReloadLightTrackDevices(QWidget* page)
@@ -514,5 +514,10 @@ void ReloadLightTrackDevices(QWidget* page)
 void PrepareLightTrackForDeviceReload(QWidget* page)
 {
     static_cast<LightTrackPage*>(page)->PrepareForDeviceReload();
+}
+
+void PauseLightTrackForProfileLoad(QWidget* page)
+{
+    static_cast<LightTrackPage*>(page)->PauseForProfileLoad();
 }
 }

@@ -83,6 +83,7 @@ void EffectManager::RemoveMapping(RGBEffect* effect)
 {
     std::lock_guard<std::mutex> guard(lock);
     effect_zones.erase(effect);
+    unresolved_zones.erase(effect);
     previews.erase(effect);
 }
 
@@ -90,6 +91,7 @@ void EffectManager::ClearAssignments()
 {
     std::lock_guard<std::mutex> guard(lock);
     effect_zones.clear();
+    unresolved_zones.clear();
     previews.clear();
 }
 
@@ -127,7 +129,7 @@ void EffectManager::Assign(
         entry.second = std::move(remaining_zones);
     }
 
-    std::set<RGBController*> controllers;
+    std::set<RGBControllerInterface*> controllers;
     for(ControllerZone* controller_zone : controller_zones)
     {
         if(controller_zone != nullptr
@@ -137,17 +139,17 @@ void EffectManager::Assign(
         }
     }
 
-    for(RGBController* controller : controllers)
+    for(RGBControllerInterface* controller : controllers)
     {
         for(unsigned int index = 0;
-            index < controller->modes.size();
+            index < controller->GetModeCount();
             ++index)
         {
-            if(controller->modes[index].name == "Direct")
+            if(controller->GetModeName(index) == "Direct")
             {
-                if(controller->GetMode() != static_cast<int>(index))
+                if(controller->GetActiveMode() != static_cast<int>(index))
                 {
-                    controller->SetMode(index);
+                    controller->SetActiveMode(index);
                 }
                 break;
             }
@@ -155,6 +157,86 @@ void EffectManager::Assign(
     }
 
     NotifySelectionChanged(effect);
+}
+
+void EffectManager::SetUnresolvedZones(RGBEffect* effect,
+    const std::vector<nlohmann::json>& zones)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    if(zones.empty())
+    {
+        unresolved_zones.erase(effect);
+    }
+    else
+    {
+        unresolved_zones[effect] = zones;
+        effect_zones.emplace(effect, std::vector<ControllerZone*>{});
+    }
+}
+
+std::vector<nlohmann::json> EffectManager::GetUnresolvedZones(RGBEffect* effect)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    const auto found = unresolved_zones.find(effect);
+    return found == unresolved_zones.end()
+        ? std::vector<nlohmann::json>{} : found->second;
+}
+
+void EffectManager::RemapAssignedZones(const std::vector<ControllerZone*>& new_zones)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    std::lock_guard<std::mutex> frame_guard(
+        lighttrack::openrgb::ControllerFrameMutex());
+    std::set<ControllerZone*> claimed;
+    for(auto& entry : effect_zones)
+    {
+        std::vector<ControllerZone*> remapped;
+        std::vector<nlohmann::json> descriptors = unresolved_zones[entry.first];
+        for(ControllerZone* previous : entry.second)
+        {
+            if(std::find(new_zones.begin(), new_zones.end(), previous) != new_zones.end())
+            {
+                if(claimed.insert(previous).second)
+                {
+                    remapped.push_back(previous);
+                }
+            }
+            else
+            {
+                // As in the upstream API, callers must keep old controllers
+                // alive until the remap finishes. Detection uses ClearAssignments.
+                descriptors.push_back(previous->to_json());
+            }
+        }
+        std::vector<nlohmann::json> missing;
+        for(const auto& descriptor : descriptors)
+        {
+            const auto found = std::find_if(new_zones.begin(), new_zones.end(),
+                [&](ControllerZone* candidate)
+                {
+                    return claimed.count(candidate) == 0 && candidate->matches_json(descriptor);
+                });
+            if(found == new_zones.end())
+            {
+                missing.push_back(descriptor);
+                continue;
+            }
+            (*found)->reverse = descriptor.value("reverse", false);
+            (*found)->self_brightness = descriptor.value("self_brightness", 100U);
+            claimed.insert(*found);
+            remapped.push_back(*found);
+        }
+        entry.second = std::move(remapped);
+        if(missing.empty())
+        {
+            unresolved_zones.erase(entry.first);
+        }
+        else
+        {
+            unresolved_zones[entry.first] = std::move(missing);
+        }
+        NotifySelectionChanged(entry.first);
+    }
 }
 
 std::vector<ControllerZone*> EffectManager::GetAssignedZones(
@@ -208,7 +290,7 @@ void EffectManager::EffectThreadFunction(RGBEffect* effect)
             lighttrack::openrgb::SetCurrentRenderingEffect(effect);
             effect->StepEffect(controller_zones);
 
-            std::set<RGBController*> controllers;
+            std::set<RGBControllerInterface*> controllers;
             for(ControllerZone* controller_zone : controller_zones)
             {
                 if(controller_zone != nullptr
@@ -217,7 +299,7 @@ void EffectManager::EffectThreadFunction(RGBEffect* effect)
                     controllers.insert(controller_zone->controller);
                 }
             }
-            for(RGBController* controller : controllers)
+            for(RGBControllerInterface* controller : controllers)
             {
                 controller->UpdateLEDs();
             }

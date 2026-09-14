@@ -10,7 +10,7 @@
 #include <memory>
 #include <vector>
 
-class ResourceManagerInterface;
+class OpenRGBPluginAPIInterface;
 class RGBEffect;
 class QWidget;
 
@@ -48,7 +48,7 @@ public:
         QString empty_message;
     };
 
-    explicit OpenRgbTimelineBackend(ResourceManagerInterface* resource_manager);
+    explicit OpenRgbTimelineBackend(OpenRGBPluginAPIInterface* plugin_api);
     ~OpenRgbTimelineBackend();
 
     OpenRgbTimelineBackend(const OpenRgbTimelineBackend&) = delete;

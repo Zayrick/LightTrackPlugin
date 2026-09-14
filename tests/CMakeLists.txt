@@ -26,11 +26,14 @@ add_executable(lighttrack_openrgb_runtime_tests
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbEffectManager.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbRenderCoordinator.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbColorRouter.cpp"
-  "${OPENRGB_DIR}/RGBController/RGBController.cpp"
+  "${OPENRGB_DIR}/qt/hsv.cpp"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorUtils.cpp"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ControllerZone.cpp"
   "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/RGBEffect.h"
 )
 target_include_directories(lighttrack_openrgb_runtime_tests PRIVATE
   "${PROJECT_SOURCE_DIR}/src"
+  "${OPENRGB_DIR}"
   "${OPENRGB_DIR}/RGBController"
   "${OPENRGB_DIR}/dependencies/json"
   "${OPENRGB_DIR}/qt"
@@ -76,6 +79,25 @@ if(MSVC)
     target_compile_options(${test_target} PRIVATE /EHsc)
   endforeach()
 endif()
+
+add_executable(lighttrack_plugin_smoke_tests PluginSmokeTest.cpp)
+target_include_directories(lighttrack_plugin_smoke_tests PRIVATE
+  "${OPENRGB_DIR}"
+  "${OPENRGB_DIR}/RGBController"
+  "${OPENRGB_DIR}/dependencies/json"
+)
+target_link_libraries(lighttrack_plugin_smoke_tests PRIVATE "Qt${QT_VERSION_MAJOR}::Widgets")
+add_dependencies(lighttrack_plugin_smoke_tests LightTrackPlugin)
+if(MSVC)
+  target_compile_options(lighttrack_plugin_smoke_tests PRIVATE /EHsc)
+endif()
+add_test(NAME lighttrack.plugin_api
+  COMMAND ${CMAKE_COMMAND} -E env
+    "QT_QPA_PLATFORM=offscreen"
+    "PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Widgets>;$ENV{PATH}"
+    $<TARGET_FILE:lighttrack_plugin_smoke_tests> $<TARGET_FILE:LightTrackPlugin>
+)
+set_tests_properties(lighttrack.plugin_api PROPERTIES TIMEOUT 30)
 
 if(WIN32)
   add_test(

@@ -3,14 +3,17 @@
 #include "OpenRGBEffectSettings.h"
 #include "OpenRGBEffectsPlugin.h"
 
-ResourceManagerInterface* OpenRGBEffectsPlugin::RMPointer = nullptr;
+OpenRGBPluginAPIInterface* OpenRGBEffectsPlugin::api = nullptr;
+std::atomic<bool> OpenRGBEffectsPlugin::controllers_updating{false};
+std::vector<ControllerZone*> OpenRGBEffectsPlugin::controller_zones;
+std::shared_mutex OpenRGBEffectsPlugin::controller_zones_mutex;
 
 namespace lighttrack::openrgb
 {
-void InitializeEffectsRuntime(ResourceManagerInterface* resource_manager)
+void InitializeEffectsRuntime(OpenRGBPluginAPIInterface* plugin_api)
 {
-    OpenRGBEffectsPlugin::RMPointer = resource_manager;
-    if(resource_manager != nullptr)
+    OpenRGBEffectsPlugin::api = plugin_api;
+    if(plugin_api != nullptr)
     {
         // The upstream loader appends preferred colors, so reset first when a
         // plugin pause/resume cycle initializes the runtime more than once.
@@ -21,6 +24,6 @@ void InitializeEffectsRuntime(ResourceManagerInterface* resource_manager)
 
 void ShutdownEffectsRuntime()
 {
-    OpenRGBEffectsPlugin::RMPointer = nullptr;
+    OpenRGBEffectsPlugin::api = nullptr;
 }
 }

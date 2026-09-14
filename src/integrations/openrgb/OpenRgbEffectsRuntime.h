@@ -1,9 +1,9 @@
 #pragma once
 
-class ResourceManagerInterface;
+class OpenRGBPluginAPIInterface;
 
 namespace lighttrack::openrgb
 {
-void InitializeEffectsRuntime(ResourceManagerInterface* resource_manager);
+void InitializeEffectsRuntime(OpenRGBPluginAPIInterface* plugin_api);
 void ShutdownEffectsRuntime();
 }

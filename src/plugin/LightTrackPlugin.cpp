@@ -3,7 +3,8 @@
 #include "integrations/openrgb/OpenRgbEffectsRuntime.h"
 #include "ui/pages/LightTrackPage.h"
 
-#include "ResourceManagerInterface.h"
+#include "OpenRGBPluginInterface.h"
+#include "ResourceManagerCallback.h"
 
 #include <QMetaObject>
 #include <QThread>
@@ -16,7 +17,7 @@ LightTrackPlugin::~LightTrackPlugin()
 
 OpenRGBPluginInfo LightTrackPlugin::GetPluginInfo()
 {
-    OpenRGBPluginInfo info;
+    OpenRGBPluginInfo info{};
     info.Name = "LightTrack Plugin";
     info.Description = "LightTrack integration for OpenRGB";
     info.Version = "0.1.0";
@@ -30,48 +31,38 @@ unsigned int LightTrackPlugin::GetPluginAPIVersion()
     return OPENRGB_PLUGIN_API_VERSION;
 }
 
-void LightTrackPlugin::Load(ResourceManagerInterface* resource_manager_ptr)
+void LightTrackPlugin::Load(OpenRGBPluginAPIInterface* plugin_api_ptr)
 {
-    if(resource_manager == resource_manager_ptr
-        && resource_manager != nullptr)
+    if(plugin_api == plugin_api_ptr
+        && plugin_api != nullptr)
     {
         return;
     }
 
-    if(resource_manager != resource_manager_ptr
-        && (resource_manager != nullptr
+    if(plugin_api != plugin_api_ptr
+        && (plugin_api != nullptr
             || page != nullptr
-            || callbacks_registered))
+            || page_ready.load()))
     {
         Unload();
     }
 
-    resource_manager = resource_manager_ptr;
-    lighttrack::openrgb::InitializeEffectsRuntime(resource_manager_ptr);
+    plugin_api = plugin_api_ptr;
+    lighttrack::openrgb::InitializeEffectsRuntime(plugin_api_ptr);
 }
 
 QWidget* LightTrackPlugin::GetWidget()
 {
     if(page == nullptr)
     {
-        if(resource_manager != nullptr)
+        page_ready.store(false);
+        if(plugin_api != nullptr)
         {
-            resource_manager->WaitForDeviceDetection();
+            plugin_api->WaitForDetection();
         }
 
-        page = lighttrack::ui::CreateLightTrackPage(resource_manager);
-    }
-
-    if(resource_manager != nullptr
-        && !callbacks_registered)
-    {
-        resource_manager->RegisterDeviceListChangeCallback(
-            DeviceListChangedCallback, this);
-        resource_manager->RegisterDetectionStartCallback(
-            DeviceDetectionStartedCallback, this);
-        resource_manager->RegisterDetectionEndCallback(
-            DeviceDetectionFinishedCallback, this);
-        callbacks_registered = true;
+        page = lighttrack::ui::CreateLightTrackPage(plugin_api);
+        page_ready.store(true);
     }
 
     return page.data();
@@ -84,26 +75,82 @@ QMenu* LightTrackPlugin::GetTrayMenu()
 
 void LightTrackPlugin::Unload()
 {
-    if(resource_manager != nullptr
-        && callbacks_registered)
-    {
-        resource_manager->UnregisterDeviceListChangeCallback(
-            DeviceListChangedCallback, this);
-        resource_manager->UnregisterDetectionStartCallback(
-            DeviceDetectionStartedCallback, this);
-        resource_manager->UnregisterDetectionEndCallback(
-            DeviceDetectionFinishedCallback, this);
-    }
-    callbacks_registered = false;
+    page_ready.store(false);
     detection_in_progress.store(false);
     reload_queued.store(false);
 
     QWidget* page_widget = page.data();
     delete page_widget;
     page = nullptr;
-    resource_manager = nullptr;
+    plugin_api = nullptr;
     lighttrack::openrgb::ShutdownEffectsRuntime();
 }
+
+void LightTrackPlugin::ResourceManagerUpdated(unsigned int update_reason)
+{
+    // The host can notify us while GetWidget is blocked in WaitForDetection.
+    // No work may be dispatched to the GUI until that wait has completed.
+    if(!page_ready.load())
+    {
+        return;
+    }
+    switch(update_reason)
+    {
+    case RESOURCEMANAGER_UPDATE_REASON_DETECTION_STARTED:
+        DeviceDetectionStartedCallback(this);
+        break;
+    case RESOURCEMANAGER_UPDATE_REASON_DETECTION_COMPLETE:
+        DeviceDetectionFinishedCallback(this);
+        break;
+    case RESOURCEMANAGER_UPDATE_REASON_DEVICE_LIST_UPDATED:
+        DeviceListChangedCallback(this);
+        break;
+    }
+}
+
+void LightTrackPlugin::OnProfileAboutToLoad()
+{
+    if(!page_ready.load())
+    {
+        return;
+    }
+    const auto pause = [this]()
+    {
+        if(page != nullptr)
+        {
+            lighttrack::ui::PauseLightTrackForProfileLoad(page.data());
+        }
+    };
+    if(QThread::currentThread() == thread())
+    {
+        pause();
+    }
+    else
+    {
+        QMetaObject::invokeMethod(this, pause, Qt::BlockingQueuedConnection);
+    }
+}
+
+void LightTrackPlugin::OnProfileLoad(nlohmann::json /*profile_data*/) {}
+
+nlohmann::json LightTrackPlugin::OnProfileSave()
+{
+    // Layout files remain the persistence format; no host profile payload yet.
+    return nlohmann::json::object();
+}
+
+unsigned char* LightTrackPlugin::OnSDKCommand(unsigned int /*pkt_id*/,
+    unsigned char* /*pkt_data*/, unsigned int* pkt_size)
+{
+    if(pkt_size != nullptr)
+    {
+        *pkt_size = 0;
+    }
+    return nullptr;
+}
+
+void LightTrackPlugin::ProfileManagerUpdated(unsigned int /*update_reason*/) {}
+void LightTrackPlugin::SettingsManagerUpdated(unsigned int /*update_reason*/) {}
 
 void LightTrackPlugin::DeviceListChangedCallback(void* ptr)
 {

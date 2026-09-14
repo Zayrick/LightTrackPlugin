@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(LightTrackPlugin LANGUAGES C CXX)
+project(LightTrackPlugin VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,6 +31,7 @@ add_library(LightTrackPlugin SHARED
   src/core/TimelineTypes.h
   src/core/effects/EffectDescriptor.h
   src/plugin/LightTrackPlugin.h
+  src/plugin/LightTrackPlugin.json
   src/plugin/LightTrackPlugin.cpp
   src/ui/UiHelpers.h
   src/ui/timeline/TimelineEditor.h

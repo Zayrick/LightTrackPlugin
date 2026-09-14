@@ -71,9 +71,10 @@ function(lighttrack_configure_openrgb_effects target)
   list(REMOVE_DUPLICATES openrgb_effect_ui_dirs)
 
   target_sources("${target}" PRIVATE
-    "${OPENRGB_DIR}/RGBController/RGBController.cpp"
     "${OPENRGB_DIR}/qt/hsv.cpp"
-    "${OPENRGB_DIR}/qt/QTooltipedSlider.cpp"
+    "${OPENRGB_EFFECTS_PLUGIN_DIR}/QTooltipedSlider.cpp"
+    "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorUtils.cpp"
+    "${OPENRGB_EFFECTS_PLUGIN_DIR}/ControllerZone.cpp"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectListManager.cpp"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectList.cpp"
     # EffectManager.cpp is replaced by OpenRgbEffectManager.cpp in the owning
@@ -116,18 +117,17 @@ function(lighttrack_configure_openrgb_effects target)
   )
 
   target_compile_definitions("${target}" PRIVATE
+    VERSION_STRING="${PROJECT_VERSION}"
     SHADERS_README="https://gitlab.com/OpenRGBDevelopers/OpenRGBEffectsPlugin/-/blob/master/Effects/Shaders/README.md"
   )
 
   target_include_directories("${target}" PRIVATE
+    "${OPENRGB_EFFECTS_PLUGIN_DIR}"
     "${OPENRGB_DIR}"
     "${OPENRGB_DIR}/RGBController"
     "${OPENRGB_DIR}/dependencies/json"
-    "${OPENRGB_DIR}/i2c_smbus"
-    "${OPENRGB_DIR}/net_port"
     "${OPENRGB_DIR}/qt"
     "${CMAKE_CURRENT_BINARY_DIR}"
-    "${OPENRGB_EFFECTS_PLUGIN_DIR}"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/Audio"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer"

@@ -1,12 +1,13 @@
 #pragma once
 
 class QWidget;
-class ResourceManagerInterface;
+class OpenRGBPluginAPIInterface;
 
 namespace lighttrack::ui
 {
 QWidget* CreateLightTrackPage(
-    ResourceManagerInterface* resource_manager);
+    OpenRGBPluginAPIInterface* plugin_api);
 void ReloadLightTrackDevices(QWidget* page);
 void PrepareLightTrackForDeviceReload(QWidget* page);
+void PauseLightTrackForProfileLoad(QWidget* page);
 }

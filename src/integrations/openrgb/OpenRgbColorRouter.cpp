@@ -5,12 +5,14 @@
 #include "ColorUtils.h"
 #include "ControllerZone.h"
 #include "RGBEffect.h"
+#include "OpenRGBPluginInterface.h"
 
 #include <algorithm>
 #include <functional>
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <utility>
 
 namespace
@@ -18,272 +20,141 @@ namespace
 using lighttrack::ClipId;
 using lighttrack::openrgb::CurrentRenderingEffect;
 
-class RoutedController final : public RGBController
+class RoutedController final
 {
 public:
-    using FrameCallback =
-        std::function<void(RGBController*, RGBEffect*)>;
+    using FrameCallback = std::function<void(RGBControllerInterface*, RGBEffect*)>;
 
-    RoutedController(
-        RGBController* output,
-        FrameCallback frame_callback) :
-        output_(output),
+    RoutedController(OpenRGBPluginAPIInterface* plugin_api,
+        RGBControllerInterface* output, FrameCallback frame_callback) :
+        plugin_api_(plugin_api), output_(output),
         frame_callback_(std::move(frame_callback))
     {
-        if(output_ != nullptr)
+    }
+
+    ~RoutedController()
+    {
+        for(const auto& replica : replicas_)
         {
-            name = output_->name;
-            vendor = output_->vendor;
-            description = output_->description;
-            version = output_->version;
-            serial = output_->serial;
-            location = output_->location;
-            type = DEVICE_TYPE_VIRTUAL;
+            if(replica.second != nullptr)
+            {
+                replica.second->UnregisterUpdateCallback(this);
+                plugin_api_->DeleteVirtualRGBController(replica.second);
+            }
         }
     }
 
     void AddReplica(ClipId clip_id)
     {
-        if(output_ == nullptr
-            || replicas_.find(clip_id) != replicas_.end())
-        {
-            return;
-        }
-
-        Replica replica;
-        replica.zone_offset = zones.size();
-        replica.color_offset = ColorCount();
-
-        for(const zone& source : output_->zones)
-        {
-            zone copy;
-            copy.name = source.name;
-            copy.type = source.type;
-            copy.leds_count = source.leds_count;
-            copy.leds_min = source.leds_min;
-            copy.leds_max = source.leds_max;
-            copy.segments = source.segments;
-            copy.flags = source.flags;
-
-            if(source.matrix_map != nullptr)
-            {
-                auto values = std::make_unique<unsigned int[]>(
-                    source.matrix_map->width
-                    * source.matrix_map->height);
-                std::copy_n(
-                    source.matrix_map->map,
-                    source.matrix_map->width
-                        * source.matrix_map->height,
-                    values.get());
-
-                auto matrix = std::make_unique<matrix_map_type>();
-                matrix->width = source.matrix_map->width;
-                matrix->height = source.matrix_map->height;
-                matrix->map = values.get();
-                copy.matrix_map = matrix.get();
-                matrix_values_.push_back(std::move(values));
-                matrices_.push_back(std::move(matrix));
-            }
-
-            replica.color_count += ZoneColorCount(source);
-            zones.push_back(std::move(copy));
-        }
-
-        replicas_.emplace(clip_id, replica);
+        replicas_.emplace(clip_id, nullptr);
     }
 
     void Finalize()
     {
-        leds.resize(ColorCount());
-        SetupColors();
-        std::fill(colors.begin(), colors.end(), ColorUtils::OFF());
+        RGBController_Setup setup{};
+        setup.name = output_->GetName();
+        setup.vendor = output_->GetVendor();
+        setup.description = output_->GetDescription();
+        setup.version = output_->GetVersion();
+        setup.serial = output_->GetSerial();
+        setup.location = output_->GetLocation();
+        setup.type = DEVICE_TYPE_VIRTUAL;
+        setup.flags = CONTROLLER_FLAG_VIRTUAL;
 
-        modes.resize(1);
-        modes[0].name = "Direct";
-        modes[0].colors = colors;
-        modes[0].flags =
-            MODE_FLAG_HAS_PER_LED_COLOR
-            | MODE_FLAG_HAS_BRIGHTNESS;
-        modes[0].brightness_min = 0;
-        modes[0].brightness_max = 100;
-        modes[0].brightness = 100;
-        modes[0].color_mode = MODE_COLORS_PER_LED;
-        active_mode = 0;
+        std::size_t color_count = 0;
+        for(unsigned int index = 0; index < output_->GetZoneCount(); ++index)
+        {
+            zone copy = output_->GetZone(index);
+            // GetZone returns value-owned matrix/segment metadata, but its
+            // LED and color pointers still refer to the physical controller.
+            copy.leds = nullptr;
+            copy.colors = nullptr;
+            copy.start_idx = 0;
+            copy.modes.clear();
+            copy.active_mode = -1;
+            color_count += (copy.flags & ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE_EFFECTS_ONLY)
+                && copy.leds_count > 1 ? 1 : copy.leds_count;
+            setup.zones.push_back(std::move(copy));
+        }
+        setup.leds.resize(color_count);
+        setup.modes.resize(1);
+        mode& direct = setup.modes.front();
+        direct.name = "Direct";
+        direct.colors.resize(color_count);
+        direct.flags = MODE_FLAG_HAS_PER_LED_COLOR | MODE_FLAG_HAS_BRIGHTNESS;
+        direct.brightness_min = 0;
+        direct.brightness_max = 100;
+        direct.brightness = 100;
+        direct.color_mode = MODE_COLORS_PER_LED;
+        setup.active_mode = 0;
+
+        // Each clip gets its own unregistered virtual controller. Effects
+        // that read GetColor(0) now read only their own previous frame.
+        for(auto& replica : replicas_)
+        {
+            replica.second = plugin_api_->CreateVirtualRGBController(&setup);
+            if(replica.second == nullptr)
+            {
+                throw std::runtime_error("OpenRGB could not create a layer buffer");
+            }
+            replica.second->SetAllColors(ColorUtils::OFF());
+            // UpdateLEDs signals synchronously on the rendering thread.
+            // DeviceUpdateLEDs runs later on a host worker; using it here
+            // would lose the effect identity and could deadlock on teardown.
+            replica.second->RegisterUpdateCallback(
+                [](void* context, unsigned int reason, void*)
+                {
+                    if(reason == RGBCONTROLLER_UPDATE_REASON_UPDATELEDS)
+                    {
+                        static_cast<RoutedController*>(context)->UpdateLEDs();
+                    }
+                }, this);
+        }
     }
 
     std::unique_ptr<ControllerZone> CreateZone(
-        ClipId clip_id,
-        const ControllerZone& output_zone)
+        ClipId clip_id, const ControllerZone& output_zone)
     {
         const auto replica = replicas_.find(clip_id);
-        if(replica == replicas_.end())
+        if(replica == replicas_.end() || replica->second == nullptr)
         {
             return {};
         }
-
-        const std::size_t zone_index =
-            replica->second.zone_offset
-            + output_zone.zone_idx;
-        if(zone_index >= zones.size())
-        {
-            return {};
-        }
-
-        return std::make_unique<ControllerZone>(
-            this,
-            static_cast<unsigned int>(zone_index),
-            output_zone.reverse,
-            static_cast<int>(output_zone.self_brightness),
-            output_zone.is_segment,
-            output_zone.segment_idx);
-    }
-
-    void BindEffect(ClipId clip_id, RGBEffect* effect)
-    {
-        const auto replica = replicas_.find(clip_id);
-        if(replica == replicas_.end())
-        {
-            return;
-        }
-
-        for(auto binding = effect_replicas_.begin();
-            binding != effect_replicas_.end();)
-        {
-            if(binding->second.clip_id == clip_id)
-            {
-                binding = effect_replicas_.erase(binding);
-            }
-            else
-            {
-                ++binding;
-            }
-        }
-
-        if(effect != nullptr)
-        {
-            effect_replicas_[effect] = {
-                clip_id,
-                replica->second.color_offset,
-                replica->second.color_count
-            };
-        }
+        return std::make_unique<ControllerZone>(replica->second,
+            output_zone.zone_idx, output_zone.reverse,
+            static_cast<int>(output_zone.self_brightness), true,
+            output_zone.is_segment, output_zone.segment_idx);
     }
 
     void ClearLayer(ClipId clip_id)
     {
         const auto replica = replicas_.find(clip_id);
-        if(replica == replicas_.end())
+        if(replica != replicas_.end() && replica->second != nullptr)
         {
-            return;
+            replica->second->SetAllColors(ColorUtils::OFF());
         }
-
-        const std::size_t begin = replica->second.color_offset;
-        const std::size_t end = std::min(
-            colors.size(),
-            begin + replica->second.color_count);
-        std::fill(
-            colors.begin() + begin,
-            colors.begin() + end,
-            ColorUtils::OFF());
     }
 
-    RGBColor GetLED(unsigned int led) override
+private:
+    void UpdateLEDs()
     {
-        RGBEffect* effect = CurrentRenderingEffect();
-        const auto replica = effect_replicas_.find(effect);
-        if(replica != effect_replicas_.end()
-            && led < replica->second.color_count)
-        {
-            return colors[replica->second.color_offset + led];
-        }
-        return RGBController::GetLED(led);
-    }
-
-    void UpdateLEDs() override
-    {
-        if(!frame_callback_)
-        {
-            return;
-        }
-
         RGBEffect* effect = CurrentRenderingEffect();
         if(effect != nullptr)
         {
             frame_callback_(output_, effect);
             return;
         }
-
         std::lock_guard<std::mutex> frame_guard(
             lighttrack::openrgb::ControllerFrameMutex());
         frame_callback_(output_, nullptr);
     }
 
-    void SetupZones() override
-    {
-    }
-
-    void ResizeZone(int, int) override
-    {
-    }
-
-    void DeviceUpdateLEDs() override
-    {
-    }
-
-    void UpdateZoneLEDs(int) override
-    {
-    }
-
-    void UpdateSingleLED(int) override
-    {
-    }
-
-    void DeviceUpdateMode() override
-    {
-    }
-
-private:
-    struct Replica
-    {
-        std::size_t zone_offset = 0;
-        std::size_t color_offset = 0;
-        std::size_t color_count = 0;
-    };
-
-    struct EffectReplica
-    {
-        ClipId clip_id;
-        std::size_t color_offset = 0;
-        std::size_t color_count = 0;
-    };
-
-    std::size_t ColorCount() const
-    {
-        std::size_t count = 0;
-        for(const zone& value : zones)
-        {
-            count += ZoneColorCount(value);
-        }
-        return count;
-    }
-
-    static std::size_t ZoneColorCount(const zone& value)
-    {
-        if((value.flags & ZONE_FLAG_RESIZE_EFFECTS_ONLY) != 0
-            && value.leds_count > 1)
-        {
-            return 1;
-        }
-        return value.leds_count;
-    }
-
-    RGBController* output_ = nullptr;
+    OpenRGBPluginAPIInterface* plugin_api_;
+    RGBControllerInterface* output_;
     FrameCallback frame_callback_;
-    std::map<ClipId, Replica> replicas_;
-    std::map<RGBEffect*, EffectReplica> effect_replicas_;
-    std::vector<std::unique_ptr<unsigned int[]>> matrix_values_;
-    std::vector<std::unique_ptr<matrix_map_type>> matrices_;
+    std::map<ClipId, RGBControllerInterface*> replicas_;
 };
+
 }
 
 namespace lighttrack::openrgb
@@ -291,6 +162,8 @@ namespace lighttrack::openrgb
 class OpenRgbColorRouter::Impl
 {
 public:
+    explicit Impl(OpenRGBPluginAPIInterface* plugin_api) : plugin_api_(plugin_api) {}
+
     struct LayerState;
 
     struct Route
@@ -380,7 +253,7 @@ public:
 
         for(auto& target : targets_)
         {
-            RGBController* output_controller =
+            RGBControllerInterface* output_controller =
                 target.second.output->controller;
             if(controllers_.find(output_controller)
                 == controllers_.end())
@@ -388,9 +261,10 @@ public:
                 controllers_.emplace(
                     output_controller,
                     std::make_unique<RoutedController>(
+                        plugin_api_,
                         output_controller,
                         [this](
-                            RGBController* output,
+                            RGBControllerInterface* output,
                             RGBEffect* effect)
                         {
                             OnVirtualFrame(output, effect);
@@ -406,7 +280,7 @@ public:
                 continue;
             }
 
-            std::set<RGBController*> layer_controllers;
+            std::set<RGBControllerInterface*> layer_controllers;
             for(ControllerZone* target : definition.targets)
             {
                 const auto target_state = targets_.find(target);
@@ -416,7 +290,7 @@ public:
                         target_state->second.output->controller);
                 }
             }
-            for(RGBController* output : layer_controllers)
+            for(RGBControllerInterface* output : layer_controllers)
             {
                 controllers_[output]->AddReplica(definition.clip_id);
             }
@@ -535,10 +409,6 @@ public:
             effect_layers_[effect] = &layer->second;
         }
 
-        for(auto& controller : controllers_)
-        {
-            controller.second->BindEffect(clip_id, effect);
-        }
     }
 
     void SetLayerActive(ClipId clip_id, bool active)
@@ -639,7 +509,7 @@ private:
     }
 
     void OnVirtualFrame(
-        RGBController* output,
+        RGBControllerInterface* output,
         RGBEffect* rendering_effect)
     {
         if(!output_enabled_ || output == nullptr)
@@ -664,7 +534,7 @@ private:
 
     bool LayerIsVisibleOnController(
         const LayerState& layer,
-        RGBController* output) const
+        RGBControllerInterface* output) const
     {
         for(const Route* route : layer.routes)
         {
@@ -703,7 +573,7 @@ private:
             return;
         }
 
-        std::set<RGBController*> outputs;
+        std::set<RGBControllerInterface*> outputs;
         for(ControllerZone* target : targets)
         {
             const auto state = targets_.find(target);
@@ -717,7 +587,7 @@ private:
     }
 
     void PublishController(
-        RGBController* output,
+        RGBControllerInterface* output,
         bool clear_unrouted)
     {
         bool changed = false;
@@ -789,16 +659,16 @@ private:
         return false;
     }
 
-    void Submit(const std::set<RGBController*>& outputs) const
+    void Submit(const std::set<RGBControllerInterface*>& outputs) const
     {
-        for(RGBController* output : outputs)
+        for(RGBControllerInterface* output : outputs)
         {
             ForceDirectMode(output);
             output->UpdateLEDs();
         }
     }
 
-    static void ForceDirectMode(RGBController* controller)
+    static void ForceDirectMode(RGBControllerInterface* controller)
     {
         if(controller == nullptr)
         {
@@ -806,15 +676,15 @@ private:
         }
 
         for(unsigned int index = 0;
-            index < controller->modes.size();
+            index < controller->GetModeCount();
             ++index)
         {
-            if(controller->modes[index].name == "Direct")
+            if(controller->GetModeName(index) == "Direct")
             {
-                if(controller->GetMode()
+                if(controller->GetActiveMode()
                     != static_cast<int>(index))
                 {
-                    controller->SetMode(index);
+                    controller->SetActiveMode(index);
                 }
                 return;
             }
@@ -828,13 +698,14 @@ private:
     std::map<ClipId, LayerState> layers_;
     std::map<RGBEffect*, LayerState*> effect_layers_;
     std::vector<std::unique_ptr<Route>> routes_;
-    std::map<RGBController*, std::unique_ptr<RoutedController>>
+    std::map<RGBControllerInterface*, std::unique_ptr<RoutedController>>
         controllers_;
     bool output_enabled_ = false;
+    OpenRGBPluginAPIInterface* plugin_api_;
 };
 
-OpenRgbColorRouter::OpenRgbColorRouter() :
-    impl_(std::make_unique<Impl>())
+OpenRgbColorRouter::OpenRgbColorRouter(OpenRGBPluginAPIInterface* plugin_api) :
+    impl_(std::make_unique<Impl>(plugin_api))
 {
 }
 

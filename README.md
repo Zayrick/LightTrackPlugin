@@ -2,6 +2,13 @@
 
 LightTrackPlugin 是一个基于 Qt 的 OpenRGB 插件，用时间线组织灯光效果，并提供布局持久化、音频播放与波形预览等能力。项目以 C++17 编写，同时支持 Qt 5 和 Qt 6。
 
+当前版本面向 **OpenRGB 1.0（插件 API 5）**，两个 OpenRGB 子模块均固定到 `release_1.0`：
+
+- `deps/OpenRGB`：`81bbe18a84c2e507006f19dd252e397e40a56bfe`
+- `deps/OpenRGBEffectsPlugin`：`0e0f1b4708c302bad4270ab62349b2efe5dcc439`
+
+插件使用宿主 API 创建独立的虚拟控制器保存各片段的颜色，再按时间线图层优先级输出。构建所用 Qt 的主版本和架构应与 OpenRGB 宿主一致。
+
 ## 获取源码
 
 项目通过 Git 子模块引用 OpenRGB、OpenRGBEffectsPlugin 和 miniaudio。首次克隆时应同时初始化子模块：
@@ -97,3 +104,7 @@ cmake --preset qt5-release -D BUILD_TESTING=ON
 cmake --build --preset qt5-release
 ctest --test-dir build/qt5-release -C Release --output-on-failure
 ```
+
+测试覆盖布局持久化、历史记录、时间线复制粘贴、重叠灯效与矩阵分段路由，以及实际插件 DLL 的 API 5 加载、设备重扫通知和反复卸载。灯效测试使用模拟控制器，不访问真实 RGB 硬件或播放音频。
+
+布局继续通过项目原有的布局文件保存；加载 OpenRGB 宿主配置时会暂停 LightTrack 播放，暂不向宿主配置写入布局数据，也不提供插件 SDK 命令。

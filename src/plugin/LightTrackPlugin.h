@@ -6,12 +6,12 @@
 
 #include <atomic>
 
-class ResourceManagerInterface;
+class OpenRGBPluginAPIInterface;
 
 class LightTrackPlugin : public QObject, public OpenRGBPluginInterface
 {
     Q_OBJECT
-    Q_PLUGIN_METADATA(IID OpenRGBPluginInterface_IID)
+    Q_PLUGIN_METADATA(IID OpenRGBPluginInterface_IID FILE "LightTrackPlugin.json")
     Q_INTERFACES(OpenRGBPluginInterface)
 
 public:
@@ -19,10 +19,17 @@ public:
 
     OpenRGBPluginInfo GetPluginInfo() override;
     unsigned int GetPluginAPIVersion() override;
-    void Load(ResourceManagerInterface* resource_manager_ptr) override;
+    void Load(OpenRGBPluginAPIInterface* plugin_api_ptr) override;
     QWidget* GetWidget() override;
     QMenu* GetTrayMenu() override;
     void Unload() override;
+    void OnProfileAboutToLoad() override;
+    void OnProfileLoad(nlohmann::json profile_data) override;
+    nlohmann::json OnProfileSave() override;
+    unsigned char* OnSDKCommand(unsigned int pkt_id, unsigned char* pkt_data, unsigned int* pkt_size) override;
+    void ProfileManagerUpdated(unsigned int update_reason) override;
+    void ResourceManagerUpdated(unsigned int update_reason) override;
+    void SettingsManagerUpdated(unsigned int update_reason) override;
 
 private:
     static void DeviceListChangedCallback(void* ptr);
@@ -32,9 +39,9 @@ private:
     void PrepareForDeviceReload();
     void QueueDeviceReload();
 
-    ResourceManagerInterface* resource_manager = nullptr;
+    OpenRGBPluginAPIInterface* plugin_api = nullptr;
     QPointer<QWidget> page;
-    bool callbacks_registered = false;
+    std::atomic<bool> page_ready{false};
     std::atomic<bool> detection_in_progress{false};
     std::atomic<bool> reload_queued{false};
 };

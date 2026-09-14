@@ -8,8 +8,8 @@
 #include "ControllerZone.h"
 #include "EffectManager.h"
 #include "OpenRGBEffectPage.h"
-#include "RGBController/RGBController.h"
-#include "ResourceManagerInterface.h"
+#include "RGBControllerInterface.h"
+#include "OpenRGBPluginInterface.h"
 
 #include <QFrame>
 #include <QPointer>
@@ -90,7 +90,7 @@ struct LaneEntry
 {
     QString name;
     int level = 0;
-    RGBController* controller = nullptr;
+    RGBControllerInterface* controller = nullptr;
     int zone_index = -1;
     int segment_index = -1;
     QString state_key;
@@ -131,8 +131,9 @@ RGBEffect* OpenRgbTimelineBackend::Effect::Get() const noexcept
 class OpenRgbTimelineBackend::Impl
 {
 public:
-    explicit Impl(ResourceManagerInterface* resource_manager) :
-        resource_manager_(resource_manager)
+    explicit Impl(OpenRGBPluginAPIInterface* plugin_api) :
+        plugin_api_(plugin_api),
+        color_router_(plugin_api)
     {
     }
 
@@ -163,15 +164,15 @@ public:
         lanes_.clear();
 
         OpenRgbTimelineBackend::DeviceSnapshot snapshot;
-        if(resource_manager_ == nullptr)
+        if(plugin_api_ == nullptr)
         {
             snapshot.empty_message =
-                QStringLiteral("OpenRGB resource manager unavailable");
+                QStringLiteral("OpenRGB plugin API unavailable");
             return snapshot;
         }
 
-        std::vector<RGBController*>& controllers =
-            resource_manager_->GetRGBControllers();
+        const std::vector<RGBControllerInterface*> controllers =
+            plugin_api_->GetRGBControllers();
         if(controllers.empty())
         {
             snapshot.empty_message = QStringLiteral("No devices");
@@ -182,7 +183,7 @@ public:
             controller_index < static_cast<int>(controllers.size());
             ++controller_index)
         {
-            RGBController* controller = controllers[controller_index];
+            RGBControllerInterface* controller = controllers[controller_index];
             if(controller == nullptr)
             {
                 continue;
@@ -197,10 +198,10 @@ public:
                 0);
 
             for(int zone_index = 0;
-                zone_index < static_cast<int>(controller->zones.size());
+                zone_index < static_cast<int>(controller->GetZoneCount());
                 ++zone_index)
             {
-                const zone& zone_ref = controller->zones[zone_index];
+                const zone zone_ref = controller->GetZone(zone_index);
                 const int zone_lane = AddLane(
                     QString::fromStdString(zone_ref.name),
                     1,
@@ -321,16 +322,14 @@ public:
         serialized["zoneIndex"] = lane.zone_index;
         serialized["segmentIndex"] = lane.segment_index;
 
-        if(lane.controller != nullptr)
+        if(!lane.state_key.isEmpty())
         {
-            serialized["controller"] = {
-                {"name", lane.controller->GetName()},
-                {"location", lane.controller->GetLocation()},
-                {"serial", lane.controller->GetSerial()},
-                {"description", lane.controller->GetDescription()},
-                {"version", lane.controller->GetVersion()},
-                {"vendor", lane.controller->GetVendor()}
-            };
+            // Queued layout restoration runs after the host may have removed
+            // this controller. Use the identity captured during discovery.
+            json identity = json::parse(ToUtf8String(lane.state_key));
+            identity.erase("zoneIndex");
+            identity.erase("segmentIndex");
+            serialized["controller"] = std::move(identity);
         }
 
         return QByteArray::fromStdString(serialized.dump());
@@ -776,7 +775,7 @@ private:
     }
 
     bool ControllerMatches(
-        RGBController* controller,
+        RGBControllerInterface* controller,
         const json& saved_controller) const
     {
         if(controller == nullptr || !saved_controller.is_object())
@@ -890,7 +889,7 @@ private:
     }
 
     QString LaneStateKey(
-        RGBController* controller,
+        RGBControllerInterface* controller,
         int zone_index,
         int segment_index) const
     {
@@ -915,7 +914,7 @@ private:
     int AddLane(
         const QString& native_name,
         int level,
-        RGBController* controller,
+        RGBControllerInterface* controller,
         int zone_index,
         int segment_index,
         int led_count)
@@ -949,16 +948,26 @@ private:
 
     void AddRuntimeTarget(
         int lane,
-        RGBController* controller,
+        RGBControllerInterface* controller,
         int zone_index,
         int segment_index)
     {
+        bool has_direct = false;
+        for(unsigned int index = 0; index < controller->GetModeCount(); ++index)
+        {
+            if(controller->GetModeName(index) == "Direct")
+            {
+                has_direct = true;
+                break;
+            }
+        }
         runtime_zones_.push_back(
             std::make_unique<ControllerZone>(
                 controller,
                 static_cast<unsigned int>(zone_index),
                 false,
                 100,
+                has_direct,
                 segment_index >= 0,
                 segment_index));
         runtime_targets_.push_back(
@@ -1090,7 +1099,7 @@ private:
         manager->RemoveMapping(runtime_effect);
     }
 
-    ResourceManagerInterface* resource_manager_ = nullptr;
+    OpenRGBPluginAPIInterface* plugin_api_ = nullptr;
     EffectFactory effect_factory_;
     OpenRgbColorRouter color_router_;
     QVector<LaneEntry> lanes_;
@@ -1105,8 +1114,8 @@ private:
 };
 
 OpenRgbTimelineBackend::OpenRgbTimelineBackend(
-    ResourceManagerInterface* resource_manager) :
-    impl_(std::make_unique<Impl>(resource_manager))
+    OpenRGBPluginAPIInterface* plugin_api) :
+    impl_(std::make_unique<Impl>(plugin_api))
 {
 }
 

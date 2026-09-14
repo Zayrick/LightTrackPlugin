@@ -2,13 +2,14 @@
 
 #include "core/TimelineTypes.h"
 
-#include "RGBController.h"
+#include "RGBControllerInterface.h"
 
 #include <memory>
 #include <vector>
 
 class ControllerZone;
 class RGBEffect;
+class OpenRGBPluginAPIInterface;
 
 namespace lighttrack::openrgb
 {
@@ -29,7 +30,7 @@ public:
         RGBColor color = 0;
     };
 
-    OpenRgbColorRouter();
+    explicit OpenRgbColorRouter(OpenRGBPluginAPIInterface* plugin_api);
     ~OpenRgbColorRouter();
 
     OpenRgbColorRouter(const OpenRgbColorRouter&) = delete;

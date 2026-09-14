@@ -1,0 +1,8 @@
+{
+  "Id": "org.openrgb.lighttrackplugin",
+  "Name": "LightTrack Plugin",
+  "Version": "0.1.0",
+  "VersionStr": "0.1.0",
+  "Description": "LightTrack integration for OpenRGB",
+  "OpenRGBPluginAPIVersion": 5
+}

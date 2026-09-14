@@ -1,3 +1,4 @@
+#include "OpenRgbTestHost.h"
 #include "EffectManager.h"
 #include "integrations/openrgb/OpenRgbColorRouter.h"
 
@@ -12,59 +13,6 @@
 
 namespace
 {
-class RecordingController final : public RGBController
-{
-public:
-    RecordingController()
-    {
-        name = "Router output";
-        type = DEVICE_TYPE_VIRTUAL;
-        zones.resize(1);
-        zones[0].name = "Output";
-        zones[0].type = ZONE_TYPE_LINEAR;
-        zones[0].leds_count = 2;
-        zones[0].leds_min = 2;
-        zones[0].leds_max = 2;
-        leds.resize(2);
-        SetupColors();
-
-        modes.resize(1);
-        modes[0].name = "Direct";
-        modes[0].color_mode = MODE_COLORS_PER_LED;
-    }
-
-    void UpdateLEDs() override
-    {
-        updates++;
-    }
-
-    void SetupZones() override
-    {
-    }
-
-    void ResizeZone(int, int) override
-    {
-    }
-
-    void DeviceUpdateLEDs() override
-    {
-    }
-
-    void UpdateZoneLEDs(int) override
-    {
-    }
-
-    void UpdateSingleLED(int) override
-    {
-    }
-
-    void DeviceUpdateMode() override
-    {
-    }
-
-    int updates = 0;
-};
-
 class CountingEffect final : public RGBEffect
 {
 public:
@@ -169,9 +117,10 @@ int main(int argc, char** argv)
     manager->RemoveMapping(&first);
     manager->RemoveMapping(&second);
 
-    RecordingController output;
-    ControllerZone output_zone(&output, 0, false, 100, false);
-    lighttrack::openrgb::OpenRgbColorRouter router;
+    TestPluginAPI api;
+    TestController output(TestController::LinearSetup());
+    ControllerZone output_zone(&output, 0, false, 100, true, false);
+    lighttrack::openrgb::OpenRgbColorRouter router(&api);
     router.SetTargets({&output_zone});
     router.ConfigureLayers({
         {lighttrack::ClipId(1), 0, 0, {&output_zone}},
@@ -208,5 +157,69 @@ int main(int argc, char** argv)
     CHECK(output.colors[0] == ToRGBColor(0, 255, 0));
     router.SetLayerActive(lighttrack::ClipId(1), false);
     CHECK(output.colors[0] == ColorUtils::OFF());
+    CHECK(lower[0]->controller != upper[0]->controller);
+    CHECK(lower[0]->controller->GetColor(0) == ToRGBColor(0, 255, 0));
+    CHECK(upper[0]->controller->GetColor(0) == ToRGBColor(0, 0, 255));
+    router.Reset();
+    CHECK(api.virtual_controllers.empty());
+    CHECK(api.created == api.deleted);
+
+    RGBController_Setup setup = TestController::LinearSetup();
+    setup.zones[0].type = ZONE_TYPE_MATRIX;
+    setup.zones[0].leds_count = 4;
+    setup.zones[0].matrix_map.width = 2;
+    setup.zones[0].matrix_map.height = 2;
+    setup.zones[0].matrix_map.map = {0, 1, 2, 3};
+    segment part;
+    part.name = "Middle";
+    part.type = ZONE_TYPE_LINEAR;
+    part.start_idx = 1;
+    part.leds_count = 2;
+    setup.zones[0].segments.push_back(part);
+    setup.zones.push_back(TestController::LinearSetup().zones[0]);
+    TestController segmented(std::move(setup));
+    ControllerZone segment_zone(&segmented, 0, false, 100, true, true, 0);
+    ControllerZone second_zone(&segmented, 1, false, 100, true, false);
+    router.SetTargets({&segment_zone, &second_zone});
+    router.ConfigureLayers({
+        {lighttrack::ClipId(3), 0, 0, {&segment_zone, &second_zone}},
+        {lighttrack::ClipId(4), 1, 1, {&segment_zone}}
+    });
+    const auto base = router.LayerZones(lighttrack::ClipId(3));
+    const auto overlay = router.LayerZones(lighttrack::ClipId(4));
+    CHECK(base.size() == 2 && overlay.size() == 1);
+    CHECK(base[0]->is_segment && base[0]->segment_idx == 0);
+    CHECK(base[0]->start_idx() == 1 && base[0]->leds_count() == 2);
+    CHECK(base[1]->start_idx() == 4);
+    CHECK(base[0]->controller->GetZoneMatrixMap(0).map == std::vector<unsigned int>({0, 1, 2, 3}));
+    segmented.setup.zones[0].matrix_map.map[0] = 99;
+    CHECK(base[0]->controller->GetZoneMatrixMap(0).map[0] == 0);
+    router.StartOutput();
+    router.SetLayerActive(lighttrack::ClipId(3), true);
+    base[0]->SetAllZoneLEDs(ToRGBColor(255, 0, 0), 100, 0, 0);
+    base[1]->SetAllZoneLEDs(ToRGBColor(0, 0, 255), 100, 0, 0);
+    base[0]->controller->UpdateLEDs();
+    CHECK(segmented.colors == std::vector<RGBColor>({0, ToRGBColor(255, 0, 0), ToRGBColor(255, 0, 0), 0, ToRGBColor(0, 0, 255), ToRGBColor(0, 0, 255)}));
+    router.SetLayerActive(lighttrack::ClipId(4), true);
+    overlay[0]->SetAllZoneLEDs(ToRGBColor(0, 255, 0), 100, 0, 0);
+    overlay[0]->controller->UpdateLEDs();
+    CHECK(segmented.colors[1] == ToRGBColor(0, 255, 0));
+    CHECK(segmented.colors[4] == ToRGBColor(0, 0, 255));
+    router.SetLayerActive(lighttrack::ClipId(4), false);
+    CHECK(segmented.colors[1] == ToRGBColor(255, 0, 0));
+    router.StopOutput();
+    router.Reset();
+    CHECK(api.virtual_controllers.empty());
+    CHECK(api.created == api.deleted);
+
+    manager->SetUnresolvedZones(&first, {segment_zone.to_json()});
+    CHECK(manager->GetUnresolvedZones(&first).size() == 1);
+    manager->RemapAssignedZones({&segment_zone});
+    CHECK(manager->GetUnresolvedZones(&first).empty());
+    CHECK(manager->GetAssignedZones(&first) == std::vector<ControllerZone*>({&segment_zone}));
+    manager->RemoveMapping(&first);
+    manager->SetUnresolvedZones(&first, {segment_zone.to_json()});
+    manager->ClearAssignments();
+    CHECK(manager->GetUnresolvedZones(&first).empty());
     return 0;
 }

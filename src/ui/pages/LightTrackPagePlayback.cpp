@@ -76,9 +76,9 @@ void LightTrackPage::ScheduleRuntimeBoundary(qint64 position_ms)
     }
 
     const qint64 delay_ms = qBound<qint64>(
-        1,
+        qint64{1},
         next_boundary_ms - position_ms,
-        std::numeric_limits<int>::max());
+        static_cast<qint64>(std::numeric_limits<int>::max()));
     runtime_boundary_timer->start(static_cast<int>(delay_ms));
 }
 
@@ -214,6 +214,12 @@ void LightTrackPage::PauseMusic()
     music_playing = false;
     SetPlaybackControls(true, false);
     UpdateMusicPosition();
+}
+
+void LightTrackPage::PauseForProfileLoad()
+{
+    PauseMusic();
+    StopRuntime();
 }
 
 void LightTrackPage::StopMusic()
