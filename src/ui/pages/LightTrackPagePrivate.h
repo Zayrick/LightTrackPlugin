@@ -91,7 +91,8 @@ private:
         const LayoutSnapshot& layout,
         QString& error,
         QStringList& warnings);
-    void SaveLayout();
+    void NewLayout();
+    bool SaveLayout();
     void LoadLayout();
 
     bool EnsureClipEffect(ClipId clip_id);
@@ -134,6 +135,7 @@ private:
     QLabel* settings_placeholder = nullptr;
     QPushButton* toolbar_undo_button = nullptr;
     QPushButton* toolbar_redo_button = nullptr;
+    QPushButton* toolbar_new_button = nullptr;
     QPushButton* toolbar_save_button = nullptr;
     QPushButton* toolbar_load_button = nullptr;
     QPushButton* toolbar_music_button = nullptr;
@@ -146,6 +148,7 @@ private:
     QTimer* history_commit_timer = nullptr;
     QString music_path;
     QString current_layout_path;
+    std::optional<LayoutSnapshot> persisted_layout;
     qint64 music_duration_ms = 0;
     bool music_loaded = false;
     bool music_playing = false;

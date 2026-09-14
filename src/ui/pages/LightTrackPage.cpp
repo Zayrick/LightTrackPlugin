@@ -116,6 +116,12 @@ LightTrackPage::LightTrackPage(
         ToolbarButton(0xE2A0, toolbar_left_group);
     toolbar_snap_button =
         ToolbarButton(0xE2B5, toolbar_left_group);
+    toolbar_new_button =
+        new QPushButton("New", toolbar_left_group);
+    toolbar_new_button->setFixedSize(
+        48,
+        static_cast<int>(TOOLBAR_BUTTON_SIZE));
+    toolbar_new_button->setFocusPolicy(Qt::NoFocus);
     toolbar_save_button =
         ToolbarButton(0xE14D, toolbar_left_group);
     toolbar_load_button =
@@ -123,6 +129,8 @@ LightTrackPage::LightTrackPage(
     toolbar_undo_button->setToolTip("Undo (Ctrl+Z)");
     toolbar_redo_button->setToolTip(
         "Redo (Ctrl+Shift+Z / Ctrl+Y)");
+    toolbar_new_button->setToolTip(
+        "New layout (Ctrl+N)");
     toolbar_save_button->setToolTip(
         "Save layout (Ctrl+S)");
     toolbar_load_button->setToolTip(
@@ -135,6 +143,7 @@ LightTrackPage::LightTrackPage(
     toolbar_snap_button->setToolTip(
         "Snap clips to the timeline grid and other clip edges");
     toolbar_snap_button->setAccessibleName("Timeline snapping");
+    toolbar_new_button->setAccessibleName("New layout");
     toolbar_save_button->setAccessibleName("Save layout");
     toolbar_load_button->setAccessibleName("Load layout");
     toolbar_undo_button->setEnabled(false);
@@ -142,6 +151,7 @@ LightTrackPage::LightTrackPage(
     toolbar_left_layout->addWidget(toolbar_undo_button);
     toolbar_left_layout->addWidget(toolbar_redo_button);
     toolbar_left_layout->addWidget(toolbar_snap_button);
+    toolbar_left_layout->addWidget(toolbar_new_button);
     toolbar_left_layout->addWidget(toolbar_save_button);
     toolbar_left_layout->addWidget(toolbar_load_button);
 
@@ -374,6 +384,11 @@ LightTrackPage::LightTrackPage(
         this,
         [this]() { Redo(); });
     connect(
+        toolbar_new_button,
+        &QPushButton::clicked,
+        this,
+        [this]() { NewLayout(); });
+    connect(
         toolbar_save_button,
         &QPushButton::clicked,
         this,
@@ -504,6 +519,17 @@ LightTrackPage::LightTrackPage(
             this,
             [this]() { Redo(); });
     }
+
+    QShortcut* new_shortcut =
+        new QShortcut(QKeySequence::New, this);
+    new_shortcut->setContext(
+        Qt::WidgetWithChildrenShortcut);
+    new_shortcut->setAutoRepeat(false);
+    connect(
+        new_shortcut,
+        &QShortcut::activated,
+        this,
+        [this]() { NewLayout(); });
 
     QShortcut* save_shortcut =
         new QShortcut(QKeySequence::Save, this);

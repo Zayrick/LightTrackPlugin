@@ -89,6 +89,7 @@ private:
 struct LaneEntry
 {
     QString name;
+    QString native_name;
     int level = 0;
     RGBControllerInterface* controller = nullptr;
     int zone_index = -1;
@@ -289,6 +290,19 @@ public:
             });
         }
         return states;
+    }
+
+    OpenRgbTimelineBackend::DeviceSnapshot ResetLaneStates()
+    {
+        lane_states_.clear();
+        for(LaneEntry& lane : lanes_)
+        {
+            lane.name = lane.native_name;
+            lane.highlighted = false;
+            lane.disabled = false;
+        }
+        RefreshOverrideOutput();
+        return CurrentDeviceSnapshot();
     }
 
     OpenRgbTimelineBackend::DeviceSnapshot RestoreLaneStates(
@@ -990,6 +1004,7 @@ private:
     {
         LaneEntry lane;
         lane.name = native_name;
+        lane.native_name = native_name;
         lane.level = level;
         lane.controller = controller;
         lane.zone_index = zone_index;
@@ -1213,6 +1228,11 @@ OpenRgbTimelineBackend::ReloadDevices()
 QVector<LayoutLaneSnapshot> OpenRgbTimelineBackend::CaptureLaneStates() const
 {
     return impl_->CaptureLaneStates();
+}
+
+OpenRgbTimelineBackend::DeviceSnapshot OpenRgbTimelineBackend::ResetLaneStates()
+{
+    return impl_->ResetLaneStates();
 }
 
 OpenRgbTimelineBackend::DeviceSnapshot OpenRgbTimelineBackend::RestoreLaneStates(

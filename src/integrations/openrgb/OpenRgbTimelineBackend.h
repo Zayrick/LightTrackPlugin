@@ -62,6 +62,7 @@ public:
 
     DeviceSnapshot ReloadDevices();
     QVector<LayoutLaneSnapshot> CaptureLaneStates() const;
+    DeviceSnapshot ResetLaneStates();
     DeviceSnapshot RestoreLaneStates(
         const QVector<LayoutLaneSnapshot>& states,
         QStringList& warnings);

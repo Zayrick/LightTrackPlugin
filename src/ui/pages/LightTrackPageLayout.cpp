@@ -487,7 +487,60 @@ bool LightTrackPage::ApplyLayoutState(
     return false;
 }
 
-void LightTrackPage::SaveLayout()
+void LightTrackPage::NewLayout()
+{
+    QString error;
+    LayoutSnapshot current_layout;
+    const bool saved_current_layout = persisted_layout.has_value()
+        && TryCaptureLayoutState(current_layout, error)
+        && current_layout == *persisted_layout;
+    if(!saved_current_layout)
+    {
+        QMessageBox prompt(
+            QMessageBox::Warning,
+            "New layout",
+            current_layout_path.isEmpty()
+                ? "The current layout has not been saved."
+                : "The current layout has unsaved changes.",
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            this);
+        prompt.setInformativeText(
+            "Save the current layout before creating a new one?");
+        prompt.setDefaultButton(QMessageBox::Save);
+        prompt.setEscapeButton(QMessageBox::Cancel);
+        const int choice = prompt.exec();
+        if(choice == QMessageBox::Save)
+        {
+            if(!SaveLayout())
+            {
+                return;
+            }
+        }
+        else if(choice != QMessageBox::Discard)
+        {
+            return;
+        }
+    }
+
+    QStringList warnings;
+    if(!ApplyLayoutState({}, error, warnings))
+    {
+        QMessageBox::critical(this, "Cannot create layout", error);
+        return;
+    }
+
+    const OpenRgbTimelineBackend::DeviceSnapshot devices =
+        backend.ResetLaneStates();
+    timeline_editor->SetLanes(devices.lanes, devices.empty_message);
+    settings_placeholder->setText(
+        "Select an effect card on the timeline to configure it.");
+    current_layout_path.clear();
+    persisted_layout.reset();
+    toolbar_save_button->setToolTip("Save layout (Ctrl+S)");
+    InitializeHistory();
+}
+
+bool LightTrackPage::SaveLayout()
 {
     FlushPendingHistory();
 
@@ -499,7 +552,7 @@ void LightTrackPage::SaveLayout()
             this,
             "Cannot save layout",
             error);
-        return;
+        return false;
     }
 
     const QString suggested_path =
@@ -513,7 +566,7 @@ void LightTrackPage::SaveLayout()
         "LightTrack Layout (*.lighttrack);;JSON Files (*.json);;All Files (*.*)");
     if(path.isEmpty())
     {
-        return;
+        return false;
     }
     if(QFileInfo(path).suffix().isEmpty())
     {
@@ -526,14 +579,16 @@ void LightTrackPage::SaveLayout()
             this,
             "Cannot save layout",
             error);
-        return;
+        return false;
     }
 
     current_layout_path =
         QFileInfo(path).absoluteFilePath();
+    persisted_layout = std::move(layout);
     toolbar_save_button->setToolTip(
         QString("Save layout (Ctrl+S)\nLast saved: %1")
             .arg(current_layout_path));
+    return true;
 }
 
 void LightTrackPage::LoadLayout()
@@ -581,6 +636,17 @@ void LightTrackPage::LoadLayout()
     current_layout_path =
         QFileInfo(path).absoluteFilePath();
     CommitHistorySnapshot();
+    // Capture the restored state so legacy IDs and device ordering do not
+    // make a freshly loaded layout appear modified.
+    LayoutSnapshot restored_layout;
+    if(TryCaptureLayoutState(restored_layout, error))
+    {
+        persisted_layout = std::move(restored_layout);
+    }
+    else
+    {
+        persisted_layout.reset();
+    }
     toolbar_save_button->setToolTip(
         QString("Save layout (Ctrl+S)\nCurrent file: %1")
             .arg(current_layout_path));

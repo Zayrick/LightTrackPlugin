@@ -111,9 +111,15 @@ add_dependencies(lighttrack_lane_persistence_tests LightTrackPlugin)
 if(MSVC)
   target_compile_options(lighttrack_lane_persistence_tests PRIVATE /EHsc)
 endif()
+set(lighttrack_dialog_test_platform "offscreen")
+if(WIN32 AND QT_VERSION_MAJOR EQUAL 5)
+  # Qt 5 QMessageBox assumes a native Windows interface, which offscreen lacks.
+  # The test hides every window with WA_DontShowOnScreen.
+  set(lighttrack_dialog_test_platform "windows")
+endif()
 add_test(NAME lighttrack.lane_persistence
   COMMAND ${CMAKE_COMMAND} -E env
-    "QT_QPA_PLATFORM=offscreen"
+    "QT_QPA_PLATFORM=${lighttrack_dialog_test_platform}"
     "PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Widgets>;$ENV{PATH}"
     $<TARGET_FILE:lighttrack_lane_persistence_tests> $<TARGET_FILE:LightTrackPlugin>
 )
