@@ -1,6 +1,13 @@
 #include "TimelineEditorInternal.h"
 
+#include "integrations/openrgb/PerformanceStats.h"
+
 #include <QAction>
+#include <QCursor>
+#include <QIcon>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPixmap>
 #include <QContextMenuEvent>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -20,6 +27,18 @@
 
 namespace lighttrack::timeline_internal
 {
+namespace
+{
+QPoint MousePosition(const QMouseEvent* event)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    return event->position().toPoint();
+#else
+    return event->pos();
+#endif
+}
+}
+
 LightTrackView::LightTrackView(QWidget* parent) :
     QGraphicsView(parent),
     light_scene(new LightTrackScene(this))
@@ -77,6 +96,7 @@ void LightTrackView::SetRuler(TimelineRulerWidget* ruler_widget)
 
 void LightTrackView::SetEffects(const QVector<EffectGroup>& groups)
 {
+    effect_groups = groups;
     light_scene->SetEffects(groups);
 }
 
@@ -102,11 +122,25 @@ void LightTrackView::SetMusicSpectrum(
     SyncRuler();
 }
 
+void LightTrackView::SetMusicPeaks(const WaveformPeaks& peaks)
+{
+    light_scene->SetMusicPeaks(peaks);
+}
+
+void LightTrackView::SetWaveformStyle(WaveformStyle style)
+{
+    light_scene->SetWaveformStyle(style);
+}
+
 void LightTrackView::SetMusicPosition(
     qint64 position_ms,
     bool turn_page)
 {
     light_scene->SetMusicPosition(position_ms);
+    if(!follow_playhead)
+    {
+        return;
+    }
 
     if(position_ms <= 0)
     {
@@ -148,14 +182,16 @@ ClipId LightTrackView::RestoreClip(
     int lane,
     qint64 start_ms,
     qint64 end_ms,
-    ClipId requested_id)
+    ClipId requested_id,
+    quint64 group_id)
 {
     return light_scene->RestoreClip(
         effect_id,
         lane,
         start_ms,
         end_ms,
-        requested_id);
+        requested_id,
+        group_id);
 }
 
 void LightTrackView::SetMusicSeekCallback(
@@ -168,6 +204,163 @@ void LightTrackView::SetClipSelectedCallback(
     TimelineEditor::ClipSelectedCallback callback)
 {
     light_scene->SetClipSelectedCallback(std::move(callback));
+}
+
+void LightTrackView::SetClipActivatedCallback(
+    TimelineEditor::ClipActivatedCallback callback)
+{
+    light_scene->SetClipActivatedCallback(std::move(callback));
+}
+
+void LightTrackView::BeginPlacement(const QString& effect_id)
+{
+    placing_effect_id = effect_id;
+    viewport()->setMouseTracking(true);
+    viewport()->setCursor(Qt::CrossCursor);
+    setFocus(Qt::OtherFocusReason);
+    const QPoint position = viewport()->mapFromGlobal(QCursor::pos());
+    if(viewport()->rect().contains(position))
+    {
+        light_scene->PreviewEffectAt(
+            placing_effect_id,
+            mapToScene(position));
+    }
+}
+
+void LightTrackView::CancelPlacement()
+{
+    if(placing_effect_id.isEmpty())
+    {
+        return;
+    }
+    placing_effect_id.clear();
+    light_scene->ClearPreview();
+    viewport()->unsetCursor();
+}
+
+void LightTrackView::mousePressEvent(QMouseEvent* event)
+{
+    if(!IsPlacing())
+    {
+        QGraphicsView::mousePressEvent(event);
+        return;
+    }
+
+    swallow_release = true;
+    if(event->button() == Qt::LeftButton)
+    {
+        const QString effect_id = placing_effect_id;
+        const bool added = light_scene->AddEffectAt(
+            effect_id,
+            mapToScene(MousePosition(event)));
+        // Hold Shift to keep placing the same effect.
+        if(added && !(event->modifiers() & Qt::ShiftModifier))
+        {
+            CancelPlacement();
+        }
+    }
+    else
+    {
+        // The context menu that follows this right-click is skipped.
+        cancelled_by_right_click = event->button() == Qt::RightButton;
+        CancelPlacement();
+    }
+    event->accept();
+}
+
+void LightTrackView::mouseMoveEvent(QMouseEvent* event)
+{
+    if(IsPlacing())
+    {
+        light_scene->PreviewEffectAt(
+            placing_effect_id,
+            mapToScene(MousePosition(event)));
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseMoveEvent(event);
+}
+
+void LightTrackView::mouseReleaseEvent(QMouseEvent* event)
+{
+    if(swallow_release)
+    {
+        swallow_release = false;
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseReleaseEvent(event);
+}
+
+void LightTrackView::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if(IsPlacing())
+    {
+        mousePressEvent(event);
+        return;
+    }
+    QGraphicsView::mouseDoubleClickEvent(event);
+}
+
+void LightTrackView::paintEvent(QPaintEvent* event)
+{
+    namespace perf = lighttrack::openrgb::performance;
+    const perf::Clock::time_point start = perf::Clock::now();
+    QGraphicsView::paintEvent(event);
+    perf::RecordUi("timeline paint", perf::MsSince(start));
+}
+
+void LightTrackView::leaveEvent(QEvent* event)
+{
+    if(IsPlacing())
+    {
+        light_scene->ClearPreview();
+    }
+    QGraphicsView::leaveEvent(event);
+}
+
+void PopulateEffectMenu(
+    QMenu* menu,
+    const QVector<EffectGroup>& groups,
+    const std::function<void(const QString&)>& on_chosen)
+{
+    for(const EffectGroup& group : groups)
+    {
+        if(group.effects.isEmpty())
+        {
+            continue;
+        }
+        AddEffectActions(menu->addMenu(group.name), group, on_chosen);
+    }
+}
+
+void AddEffectActions(
+    QMenu* category,
+    const EffectGroup& group,
+    const std::function<void(const QString&)>& on_chosen)
+{
+    {
+        for(const EffectDescriptor& effect : group.effects)
+        {
+            QPixmap swatch(12, 12);
+            swatch.fill(Qt::transparent);
+            {
+                QPainter painter(&swatch);
+                painter.setRenderHint(QPainter::Antialiasing, true);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(effect.color);
+                painter.drawEllipse(QRectF(1.0, 1.0, 10.0, 10.0));
+            }
+            QAction* action =
+                category->addAction(QIcon(swatch), effect.name);
+            const QString effect_id = effect.id;
+            QObject::connect(
+                action,
+                &QAction::triggered,
+                category,
+                [on_chosen, effect_id]() { on_chosen(effect_id); });
+        }
+    }
 }
 
 void LightTrackView::SetClipRemovedCallback(
@@ -260,6 +453,25 @@ void LightTrackView::MaybeTurnPlaybackPage(qint64 position_ms)
 
 void LightTrackView::keyPressEvent(QKeyEvent* event)
 {
+    if(event->key() == Qt::Key_Escape && IsPlacing())
+    {
+        CancelPlacement();
+        event->accept();
+        return;
+    }
+    // Ctrl+G groups the selected clips, Ctrl+Shift+G ungroups them.
+    if(event->key() == Qt::Key_G
+        && (event->modifiers() & Qt::ControlModifier))
+    {
+        const bool done = (event->modifiers() & Qt::ShiftModifier)
+            ? light_scene->UngroupSelectedClips()
+            : light_scene->GroupSelectedClips();
+        if(done)
+        {
+            event->accept();
+            return;
+        }
+    }
     if(event->matches(QKeySequence::Copy)
         && light_scene->CopySelectedClips())
     {
@@ -283,6 +495,13 @@ void LightTrackView::keyPressEvent(QKeyEvent* event)
 
 void LightTrackView::contextMenuEvent(QContextMenuEvent* event)
 {
+    if(cancelled_by_right_click || IsPlacing())
+    {
+        cancelled_by_right_click = false;
+        CancelPlacement();
+        event->accept();
+        return;
+    }
     light_scene->SelectClipAt(mapToScene(event->pos()));
 
     QMenu menu(this);
@@ -296,6 +515,31 @@ void LightTrackView::contextMenuEvent(QContextMenuEvent* event)
     paste_action->setShortcut(QKeySequence::Paste);
     paste_action->setEnabled(
         light_scene->CanPasteCopiedClips());
+
+    QAction* group_action =
+        menu.addAction(QStringLiteral("Group"));
+    group_action->setShortcut(QKeySequence(QStringLiteral("Ctrl+G")));
+    group_action->setEnabled(light_scene->CanGroupSelection());
+    QAction* ungroup_action =
+        menu.addAction(QStringLiteral("Ungroup"));
+    ungroup_action->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+G")));
+    ungroup_action->setEnabled(light_scene->CanUngroupSelection());
+    QObject::connect(group_action, &QAction::triggered, this,
+        [this]() { light_scene->GroupSelectedClips(); });
+    QObject::connect(ungroup_action, &QAction::triggered, this,
+        [this]() { light_scene->UngroupSelectedClips(); });
+    menu.addSeparator();
+
+    // Add an effect exactly where the user right-clicked.
+    const QPointF click_scene_pos = mapToScene(event->pos());
+    QMenu* add_menu = menu.addMenu(QStringLiteral("Add effect"));
+    PopulateEffectMenu(
+        add_menu,
+        effect_groups,
+        [this, click_scene_pos](const QString& effect_id)
+        {
+            light_scene->AddEffectAt(effect_id, click_scene_pos);
+        });
 
     menu.addSeparator();
     QAction* delete_action =

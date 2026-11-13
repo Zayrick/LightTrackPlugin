@@ -1,15 +1,22 @@
 #include "integrations/openrgb/OpenRgbColorRouter.h"
 
 #include "integrations/openrgb/OpenRgbRenderCoordinator.h"
+#include "integrations/openrgb/PlaybackDiagnostics.h"
+#include "integrations/openrgb/LayerBufferController.h"
 
 #include "ColorUtils.h"
 #include "ControllerZone.h"
 #include "RGBEffect.h"
 #include "OpenRGBPluginInterface.h"
 
+#include <QCoreApplication>
+#include <QTimer>
+
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -23,7 +30,9 @@ using lighttrack::openrgb::CurrentRenderingEffect;
 class RoutedController final
 {
 public:
-    using FrameCallback = std::function<void(RGBControllerInterface*, RGBEffect*)>;
+    // (output controller, rendering effect, clip whose layer drew a frame)
+    using FrameCallback =
+        std::function<void(RGBControllerInterface*, RGBEffect*, ClipId)>;
 
     RoutedController(OpenRGBPluginAPIInterface* plugin_api,
         RGBControllerInterface* output, FrameCallback frame_callback) :
@@ -38,15 +47,23 @@ public:
         {
             if(replica.second != nullptr)
             {
-                replica.second->UnregisterUpdateCallback(this);
-                plugin_api_->DeleteVirtualRGBController(replica.second);
+                const auto context = contexts_.find(replica.first);
+                if(context != contexts_.end())
+                {
+                    replica.second->UnregisterUpdateCallback(
+                        context->second.get());
+                }
             }
         }
+        // owned_ deletes the layer buffers.
     }
 
-    void AddReplica(ClipId clip_id)
+    void AddReplica(
+        ClipId clip_id,
+        const lighttrack::openrgb::LayerOrientation& orientation)
     {
         replicas_.emplace(clip_id, nullptr);
+        orientations_[clip_id] = orientation;
     }
 
     void Finalize()
@@ -88,27 +105,52 @@ public:
         direct.color_mode = MODE_COLORS_PER_LED;
         setup.active_mode = 0;
 
-        // Each clip gets its own unregistered virtual controller. Effects
-        // that read GetColor(0) now read only their own previous frame.
+        // Each clip gets its own in-memory layer buffer (no device thread).
+        // Effects that read GetColor(0) read only their own previous frame.
         for(auto& replica : replicas_)
         {
-            replica.second = plugin_api_->CreateVirtualRGBController(&setup);
-            if(replica.second == nullptr)
+            const lighttrack::openrgb::LayerOrientation orientation =
+                orientations_[replica.first];
+            RGBController_Setup replica_setup = setup;
+            if(!orientation.IsIdentity())
             {
-                throw std::runtime_error("OpenRGB could not create a layer buffer");
+                for(zone& zone_setup : replica_setup.zones)
+                {
+                    lighttrack::openrgb::TransformMatrixMap(
+                        zone_setup.matrix_map,
+                        orientation);
+                    for(segment& segment_setup : zone_setup.segments)
+                    {
+                        lighttrack::openrgb::TransformMatrixMap(
+                            segment_setup.matrix_map,
+                            orientation);
+                    }
+                }
             }
+            auto& buffer = owned_[replica.first];
+            buffer = std::make_unique<lighttrack::openrgb::LayerBufferController>(
+                std::move(replica_setup));
+            replica.second = buffer.get();
             replica.second->SetAllColors(ColorUtils::OFF());
             // UpdateLEDs signals synchronously on the rendering thread.
             // DeviceUpdateLEDs runs later on a host worker; using it here
             // would lose the effect identity and could deadlock on teardown.
+            // The context carries the clip so the router knows which layer
+            // just drew a frame.
+            auto& context = contexts_[replica.first];
+            context = std::make_unique<ReplicaContext>(
+                ReplicaContext{this, replica.first});
             replica.second->RegisterUpdateCallback(
                 [](void* context, unsigned int reason, void*)
                 {
                     if(reason == RGBCONTROLLER_UPDATE_REASON_UPDATELEDS)
                     {
-                        static_cast<RoutedController*>(context)->UpdateLEDs();
+                        auto* replica_context =
+                            static_cast<ReplicaContext*>(context);
+                        replica_context->owner->UpdateLEDs(
+                            replica_context->clip_id);
                     }
-                }, this);
+                }, context.get());
         }
     }
 
@@ -120,10 +162,25 @@ public:
         {
             return {};
         }
-        return std::make_unique<ControllerZone>(replica->second,
+        auto zone = std::make_unique<ControllerZone>(replica->second,
             output_zone.zone_idx, output_zone.reverse,
             static_cast<int>(output_zone.self_brightness), true,
             output_zone.is_segment, output_zone.segment_idx);
+
+        // Matrix zones are oriented through their matrix map; strips run
+        // backwards when turned around (180 degrees) or mirrored.
+        const zone_type type = zone->type();
+        const bool is_matrix = type == ZONE_TYPE_MATRIX
+            || type == ZONE_TYPE_MATRIX_LOOP_X
+            || type == ZONE_TYPE_MATRIX_LOOP_Y;
+        const auto orientation = orientations_.find(clip_id);
+        if(!is_matrix && orientation != orientations_.end()
+            && ((orientation->second.rotation == 180)
+                != orientation->second.mirror))
+        {
+            zone->reverse = !zone->reverse;
+        }
+        return zone;
     }
 
     void ClearLayer(ClipId clip_id)
@@ -136,29 +193,94 @@ public:
     }
 
 private:
-    void UpdateLEDs()
+    struct ReplicaContext
+    {
+        RoutedController* owner;
+        ClipId clip_id;
+    };
+
+    void UpdateLEDs(ClipId clip_id)
     {
         RGBEffect* effect = CurrentRenderingEffect();
         if(effect != nullptr)
         {
-            frame_callback_(output_, effect);
+            frame_callback_(output_, effect, clip_id);
             return;
         }
         std::lock_guard<std::mutex> frame_guard(
             lighttrack::openrgb::ControllerFrameMutex());
-        frame_callback_(output_, nullptr);
+        frame_callback_(output_, nullptr, clip_id);
     }
 
     OpenRGBPluginAPIInterface* plugin_api_;
     RGBControllerInterface* output_;
     FrameCallback frame_callback_;
     std::map<ClipId, RGBControllerInterface*> replicas_;
+    std::map<ClipId, std::unique_ptr<lighttrack::openrgb::LayerBufferController>> owned_;
+    std::map<ClipId, lighttrack::openrgb::LayerOrientation> orientations_;
+    std::map<ClipId, std::unique_ptr<ReplicaContext>> contexts_;
 };
 
 }
 
 namespace lighttrack::openrgb
 {
+void TransformMatrixMap(
+    matrix_map_type& matrix,
+    const LayerOrientation& orientation)
+{
+    const unsigned int width = matrix.width;
+    const unsigned int height = matrix.height;
+    if(orientation.IsIdentity()
+        || width == 0
+        || height == 0
+        || matrix.map.size()
+            < static_cast<std::size_t>(width) * height)
+    {
+        return;
+    }
+
+    std::vector<unsigned int> source = matrix.map;
+    unsigned int source_width = width;
+    unsigned int source_height = height;
+
+    if(orientation.mirror)
+    {
+        for(unsigned int y = 0; y < source_height; ++y)
+        {
+            std::reverse(
+                source.begin() + static_cast<std::ptrdiff_t>(y) * source_width,
+                source.begin() + static_cast<std::ptrdiff_t>(y + 1) * source_width);
+        }
+    }
+
+    // Rotate clockwise in 90 degree steps.
+    const int steps = ((orientation.rotation / 90) % 4 + 4) % 4;
+    for(int step = 0; step < steps; ++step)
+    {
+        const unsigned int rotated_width = source_height;
+        const unsigned int rotated_height = source_width;
+        std::vector<unsigned int> rotated(source.size());
+        for(unsigned int y = 0; y < rotated_height; ++y)
+        {
+            for(unsigned int x = 0; x < rotated_width; ++x)
+            {
+                // Rotated (x, y) shows source (y, source_height - 1 - x).
+                rotated[static_cast<std::size_t>(y) * rotated_width + x] =
+                    source[static_cast<std::size_t>(source_height - 1 - x)
+                        * source_width + y];
+            }
+        }
+        source.swap(rotated);
+        source_width = rotated_width;
+        source_height = rotated_height;
+    }
+
+    matrix.width = source_width;
+    matrix.height = source_height;
+    matrix.map = std::move(source);
+}
+
 class OpenRgbColorRouter::Impl
 {
 public:
@@ -181,6 +303,10 @@ public:
         bool active = false;
         RGBEffect* effect = nullptr;
         std::vector<Route*> routes;
+        // Set once the layer's effect has drawn a frame since it became
+        // active. Until then the layer is not shown, so starting a clip
+        // never flashes its cleared (black) buffer.
+        bool has_frame = false;
     };
 
     struct TargetState
@@ -188,6 +314,9 @@ public:
         ControllerZone* output = nullptr;
         std::optional<RGBColor> override_color;
         std::vector<Route*> routes;
+        // An idle zone is blacked out once, then left alone so other
+        // writers (e.g. Visual Map painting the same LEDs) are not fought.
+        mutable bool cleared = false;
     };
 
     void SetTargets(std::vector<ControllerZone*> targets)
@@ -209,6 +338,7 @@ public:
     void ConfigureLayers(
         std::vector<OpenRgbColorRouter::LayerDefinition> definitions)
     {
+        used_controllers_.clear();
         controllers_.clear();
         routes_.clear();
         layers_.clear();
@@ -265,9 +395,10 @@ public:
                         output_controller,
                         [this](
                             RGBControllerInterface* output,
-                            RGBEffect* effect)
+                            RGBEffect* effect,
+                            ClipId clip_id)
                         {
-                            OnVirtualFrame(output, effect);
+                            OnVirtualFrame(output, effect, clip_id);
                         }));
             }
         }
@@ -292,7 +423,9 @@ public:
             }
             for(RGBControllerInterface* output : layer_controllers)
             {
-                controllers_[output]->AddReplica(definition.clip_id);
+                controllers_[output]->AddReplica(
+                    definition.clip_id,
+                    definition.orientation);
             }
         }
 
@@ -355,12 +488,20 @@ public:
                     return left->layer->sequence
                         < right->layer->sequence;
                 });
+            if(!target.second.routes.empty())
+            {
+                used_controllers_.insert(target.second.output->controller);
+            }
         }
     }
 
     void Reset()
     {
+        // Pending resends refer to the old controllers: cancel them.
+        alive_ = std::make_shared<int>(0);
+        settle_outputs_.clear();
         output_enabled_ = false;
+        used_controllers_.clear();
         controllers_.clear();
         routes_.clear();
         layers_.clear();
@@ -426,8 +567,18 @@ public:
             {
                 controller.second->ClearLayer(clip_id);
             }
+            for(const Route* route : layer->second.routes)
+            {
+                const auto target = targets_.find(route->output);
+                if(target != targets_.end())
+                {
+                    // Clear once again if this clip ends without drawing.
+                    target->second.cleared = false;
+                }
+            }
         }
         layer->second.active = active;
+        layer->second.has_frame = false;
 
         std::vector<ControllerZone*> affected;
         affected.reserve(layer->second.routes.size());
@@ -461,6 +612,8 @@ public:
             if(target.second.override_color != next_color)
             {
                 target.second.override_color = next_color;
+                // Apply the new state (or clear the old one) once.
+                target.second.cleared = false;
                 affected.push_back(target.first);
             }
         }
@@ -474,8 +627,17 @@ public:
         {
             layer.second.active = false;
         }
+        ResetIdleClears();
         output_enabled_ = true;
         PublishAll(false);
+    }
+
+    void ResetIdleClears()
+    {
+        for(auto& target : targets_)
+        {
+            target.second.cleared = false;
+        }
     }
 
     void RefreshIdleOutput()
@@ -485,16 +647,18 @@ public:
             return;
         }
 
-        // Targets are leaf zones/segments. Refresh only leaves without a
-        // visible effect; an empty device or parent zone lane must never
-        // clear an active child. PublishTargets batches the affected leaves
-        // into one controller update while preserving active leaf colors.
+        // Targets are leaf zones/segments. Leaves without a visible effect
+        // are blacked out once (WriteTarget skips already-cleared ones), so
+        // other writers painting them afterwards are left alone; an empty
+        // device or parent zone lane must never clear an active child.
+        // Overrides (lit/disabled lanes) are likewise applied once.
         std::vector<ControllerZone*> idle_targets;
         idle_targets.reserve(targets_.size());
         for(const auto& target : targets_)
         {
             if(target.second.override_color.has_value()
-                || TopRoute(target.second) == nullptr)
+                || (TopRoute(target.second) == nullptr
+                    && IsUsedController(target.first->controller)))
             {
                 idle_targets.push_back(target.first);
             }
@@ -508,6 +672,7 @@ public:
         {
             layer.second.active = false;
         }
+        ResetIdleClears();
         output_enabled_ = false;
         PublishAll(true);
     }
@@ -518,13 +683,14 @@ public:
     }
 
 private:
+    // Highest-priority active layer that has drawn a frame.
     const Route* TopRoute(const TargetState& target) const
     {
         for(auto route = target.routes.rbegin();
             route != target.routes.rend();
             ++route)
         {
-            if((*route)->layer->active)
+            if((*route)->layer->active && (*route)->layer->has_frame)
             {
                 return *route;
             }
@@ -532,12 +698,65 @@ private:
         return nullptr;
     }
 
+    // An active layer on this target has not drawn its first frame yet.
+    bool HasPendingRoute(const TargetState& target) const
+    {
+        for(const Route* route : target.routes)
+        {
+            if(route->layer->active && !route->layer->has_frame)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void OnVirtualFrame(
         RGBControllerInterface* output,
-        RGBEffect* rendering_effect)
+        RGBEffect* rendering_effect,
+        ClipId clip_id)
     {
+        const auto drawn = layers_.find(clip_id);
+        if(drawn != layers_.end() && drawn->second.active)
+        {
+            drawn->second.has_frame = true;
+        }
+
         if(!output_enabled_ || output == nullptr)
         {
+            return;
+        }
+
+        // Publish only the zones this clip covers and is visible on. Every
+        // other zone of the device is unchanged (its own clip publishes it);
+        // rewriting the whole device for every frame of every clip made
+        // devices with many zones and many clips (e.g. a 32-channel
+        // controller) cost the lock most of its time.
+        if(drawn != layers_.end())
+        {
+            if(!drawn->second.active)
+            {
+                return;
+            }
+            bool changed = false;
+            for(const Route* route : drawn->second.routes)
+            {
+                if(route->output->controller != output)
+                {
+                    continue;
+                }
+                const auto target = targets_.find(route->output);
+                if(target != targets_.end()
+                    && !target->second.override_color.has_value()
+                    && TopRoute(target->second) == route)
+                {
+                    changed = WriteTarget(target->second, false) || changed;
+                }
+            }
+            if(changed)
+            {
+                Submit({output});
+            }
             return;
         }
 
@@ -577,13 +796,29 @@ private:
         return false;
     }
 
+    // Devices without any clip are left alone during playback. Other
+    // plugins (e.g. Visual Map virtual devices that forward to the same
+    // physical LEDs) may be driving them, and writing black there would
+    // fight the active effect and flicker.
+    bool IsUsedController(RGBControllerInterface* controller) const
+    {
+        return used_controllers_.find(controller)
+            != used_controllers_.end();
+    }
+
+
+
     void PublishAll(bool clear_unrouted)
     {
         std::vector<ControllerZone*> targets;
         targets.reserve(targets_.size());
         for(const auto& target : targets_)
         {
-            targets.push_back(target.first);
+            if(target.second.override_color.has_value()
+                || IsUsedController(target.first->controller))
+            {
+                targets.push_back(target.first);
+            }
         }
         PublishTargets(targets, clear_unrouted);
     }
@@ -642,11 +877,20 @@ private:
 
         if(target.override_color.has_value())
         {
+            // Lit/disabled lanes are applied once, not on every frame: the
+            // same LEDs may also be painted by another plugin (e.g. a Visual
+            // Map device), and re-applying constantly makes them flicker.
+            if(target.cleared)
+            {
+                return false;
+            }
             target.output->SetAllZoneLEDs(
                 *target.override_color,
                 100,
                 0,
                 0);
+            target.cleared = true;
+            settle_outputs_.insert(target.output->controller);
             return true;
         }
 
@@ -655,6 +899,7 @@ private:
             const Route* route = TopRoute(target);
             if(route != nullptr)
             {
+                target.cleared = false;
                 const unsigned int count = std::min(
                     target.output->leds_count(),
                     route->buffer->leds_count());
@@ -671,13 +916,26 @@ private:
             }
         }
 
+        if(output_enabled_ && HasPendingRoute(target))
+        {
+            // A clip just started here but has not drawn yet: keep showing
+            // the previous frame instead of flashing black in between.
+            return false;
+        }
+
         if(output_enabled_ || clear_unrouted)
         {
+            if(target.cleared)
+            {
+                return false;
+            }
             target.output->SetAllZoneLEDs(
                 ColorUtils::OFF(),
                 100,
                 0,
                 0);
+            target.cleared = true;
+            settle_outputs_.insert(target.output->controller);
             return true;
         }
         return false;
@@ -688,8 +946,54 @@ private:
         for(RGBControllerInterface* output : outputs)
         {
             ForceDirectMode(output);
+            lighttrack::openrgb::SetSubmittingOutput(true);
             output->UpdateLEDs();
+            lighttrack::openrgb::SetSubmittingOutput(false);
         }
+        if(!settle_outputs_.empty())
+        {
+            ScheduleSettle(settle_outputs_);
+            settle_outputs_.clear();
+        }
+    }
+
+    // OpenRGB drops an UpdateLEDs request that arrives while the device
+    // thread is still sending the previous frame (it clears its request
+    // flag after DeviceUpdateLEDs). During an effect the next frame covers
+    // that, but a one-off "clear" (a clip ending with nothing after it,
+    // start/stop, a disabled lane) would leave the last frame lit - most
+    // often on slow virtual devices like Visual Map. Resend such frames a
+    // couple of times shortly afterwards.
+    void ScheduleSettle(std::set<RGBControllerInterface*> outputs) const
+    {
+        QCoreApplication* application = QCoreApplication::instance();
+        if(application == nullptr)
+        {
+            return;
+        }
+        const std::weak_ptr<int> alive = alive_;
+        QMetaObject::invokeMethod(
+            application,
+            [alive, outputs]()
+            {
+                for(const int delay_ms : {40, 150})
+                {
+                    QTimer::singleShot(delay_ms, [alive, outputs]()
+                    {
+                        if(alive.expired())
+                        {
+                            return;
+                        }
+                        std::lock_guard<std::mutex> frame_guard(
+                            lighttrack::openrgb::ControllerFrameMutex());
+                        for(RGBControllerInterface* output : outputs)
+                        {
+                            output->UpdateLEDs();
+                        }
+                    });
+                }
+            },
+            Qt::QueuedConnection);
     }
 
     static void ForceDirectMode(RGBControllerInterface* controller)
@@ -708,23 +1012,35 @@ private:
                 if(controller->GetActiveMode()
                     != static_cast<int>(index))
                 {
+                    lighttrack::openrgb::PlaybackDiagnostics::Note(
+                        QString("mode switch to Direct on %1 (was %2)")
+                            .arg(QString::fromStdString(controller->GetName()))
+                            .arg(controller->GetActiveMode()));
                     controller->SetActiveMode(index);
                 }
                 return;
             }
         }
 
+        lighttrack::openrgb::PlaybackDiagnostics::Note(
+            QString("no Direct mode: SetCustomMode+UpdateMode on %1")
+                .arg(QString::fromStdString(controller->GetName())));
         controller->SetCustomMode();
         controller->UpdateMode();
     }
 
     std::map<ControllerZone*, TargetState> targets_;
+    std::set<RGBControllerInterface*> used_controllers_;
     std::map<ClipId, LayerState> layers_;
     std::map<RGBEffect*, LayerState*> effect_layers_;
     std::vector<std::unique_ptr<Route>> routes_;
     std::map<RGBControllerInterface*, std::unique_ptr<RoutedController>>
         controllers_;
     bool output_enabled_ = false;
+    // Controllers that just got a one-off clear, resent after Submit().
+    mutable std::set<RGBControllerInterface*> settle_outputs_;
+    // Expires on Reset() so delayed resends never touch removed devices.
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
     OpenRGBPluginAPIInterface* plugin_api_;
 };
 

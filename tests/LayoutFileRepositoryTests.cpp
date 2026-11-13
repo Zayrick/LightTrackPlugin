@@ -139,6 +139,16 @@ int main()
     CHECK(repository.Load(roundtrip_path, roundtrip, error));
     CHECK(roundtrip == original);
 
+    // Clip groups are saved and loaded.
+    CHECK(!original.clips.isEmpty());
+    lighttrack::LayoutSnapshot grouped = original;
+    grouped.clips[0].group_id = 7;
+    CHECK(!(grouped == original));
+    CHECK(repository.Save(roundtrip_path, grouped, error));
+    CHECK(repository.Load(roundtrip_path, roundtrip, error));
+    CHECK(roundtrip == grouped);
+    CHECK(roundtrip.clips[0].group_id == 7);
+
     lighttrack::LayoutSnapshot lanes_only;
     lanes_only.lanes = original.lanes;
     CHECK(repository.Save(roundtrip_path, lanes_only, error));
@@ -154,6 +164,28 @@ int main()
     lighttrack::LayoutSnapshot disabled = lanes_only;
     disabled.lanes[1].disabled = false;
     CHECK(!(disabled == lanes_only));
+
+    // Waveform style is saved, part of equality, and round-trips.
+    for(const lighttrack::WaveformStyle style : {
+            lighttrack::WaveformStyle::Smooth,
+            lighttrack::WaveformStyle::Bars,
+            lighttrack::WaveformStyle::Line,
+            lighttrack::WaveformStyle::Progress,
+            lighttrack::WaveformStyle::Classic,
+            lighttrack::WaveformStyle::Studio})
+    {
+        lighttrack::LayoutSnapshot styled = lanes_only;
+        styled.music.waveform_style = style;
+        CHECK(repository.Save(roundtrip_path, styled, error));
+        CHECK(repository.Load(roundtrip_path, roundtrip, error));
+        CHECK(roundtrip.music.waveform_style == style);
+        CHECK(roundtrip == styled);
+    }
+    lighttrack::LayoutSnapshot restyled = lanes_only;
+    restyled.music.waveform_style = lighttrack::WaveformStyle::Line;
+    CHECK(!(restyled == lanes_only));
+    // Later checks expect the round-trip file to hold lanes_only.
+    CHECK(repository.Save(roundtrip_path, lanes_only, error));
 
     const QString legacy_path =
         QDir(temporary_directory.path()).filePath(
@@ -188,6 +220,20 @@ int main()
     CHECK(legacy.clips[0].serialized_effect_settings
         == QByteArrayLiteral("{\"Speed\":7}"));
     CHECK(legacy.music.duration_ms == 9000);
+    // Files without a waveform style use the default.
+    CHECK(legacy.music.waveform_style == lighttrack::WaveformStyle::Studio);
+
+    const QString future_style_path =
+        QDir(temporary_directory.path()).filePath(
+            QStringLiteral("future-style.lighttrack"));
+    CHECK(WriteFile(future_style_path, QByteArrayLiteral(
+        "{\"format\":\"OpenRGB LightTrack Layout\",\"version\":1,"
+        "\"music\":{\"path\":\"\",\"durationMs\":0,"
+        "\"waveformStyle\":\"hologram\"},\"clips\":[]}")));
+    lighttrack::LayoutSnapshot future_style;
+    CHECK(repository.Load(future_style_path, future_style, error));
+    CHECK(future_style.music.waveform_style
+        == lighttrack::WaveformStyle::Studio);
 
     const QString expected_music_path =
         QFileInfo(

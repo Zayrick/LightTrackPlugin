@@ -18,6 +18,7 @@
 #include <utility>
 
 int RunTimelineDragTests();
+int RunTimelineWaveformTests();
 
 int main(int argc, char** argv)
 {
@@ -81,7 +82,7 @@ int main(int argc, char** argv)
 
     CHECK(scene.AddEffectAt(
         QStringLiteral("rainbow"),
-        QPointF(220.0, ROW_HEIGHT + ROW_HEIGHT / 2.0)));
+        QPointF(220.0, MUSIC_ROW_HEIGHT + ROW_HEIGHT / 2.0)));
     CHECK(timeline_change_count == 1);
 
     const QVector<TimelineClip> original_clips =
@@ -179,12 +180,12 @@ int main(int argc, char** argv)
 
     send_mouse_event(
         QEvent::GraphicsSceneMousePress,
-        QPointF(800.0, ROW_HEIGHT + ROW_HEIGHT / 2.0),
+        QPointF(800.0, MUSIC_ROW_HEIGHT + ROW_HEIGHT / 2.0),
         Qt::LeftButton,
         Qt::LeftButton);
     send_mouse_event(
         QEvent::GraphicsSceneMouseRelease,
-        QPointF(800.0, ROW_HEIGHT + ROW_HEIGHT / 2.0),
+        QPointF(800.0, MUSIC_ROW_HEIGHT + ROW_HEIGHT / 2.0),
         Qt::LeftButton,
         Qt::NoButton);
     CHECK(seek_positions.size() == 2);
@@ -194,7 +195,7 @@ int main(int argc, char** argv)
     scene.SetSnappingEnabled(false);
     CHECK(scene.RestoreClip(
         QStringLiteral("rainbow"), 0, 1000, 1001, ClipId(100)).IsValid());
-    for(qreal zoom : {40.0, 240.0, 100.0})
+    for(qreal zoom : {5.0, 40.0, 240.0, 2000.0, 100.0})
     {
         CHECK(scene.SetPixelsPerSecond(zoom));
         const auto clips = scene.PersistentTimelineClips();
@@ -202,7 +203,7 @@ int main(int argc, char** argv)
         CHECK(clips[0].start_ms == 1000);
         CHECK(clips[0].end_ms == 1001);
     }
-    CHECK(scene.SelectClipAt(QPointF(103.0, 54.0)));
+    CHECK(scene.SelectClipAt(QPointF(103.0, 90.0)));
     CHECK(scene.CopySelectedClips());
     CHECK(scene.PasteCopiedClips());
     const auto short_paste = scene.PersistentTimelineClips();
@@ -214,17 +215,17 @@ int main(int argc, char** argv)
         {
             send_mouse_event(
                 QEvent::GraphicsSceneMousePress,
-                QPointF(from_x, 54.0),
+                QPointF(from_x, 90.0),
                 Qt::LeftButton,
                 Qt::LeftButton);
             send_mouse_event(
                 QEvent::GraphicsSceneMouseMove,
-                QPointF(to_x, 54.0),
+                QPointF(to_x, 90.0),
                 Qt::NoButton,
                 Qt::LeftButton);
             send_mouse_event(
                 QEvent::GraphicsSceneMouseRelease,
-                QPointF(to_x, 54.0),
+                QPointF(to_x, 90.0),
                 Qt::LeftButton,
                 Qt::NoButton);
             QCoreApplication::processEvents();
@@ -343,71 +344,71 @@ int main(int argc, char** argv)
                 Qt::LeftButton, Qt::NoButton, modifiers);
         };
 
-    click_scene(QPointF(150.0, 54.0));
-    click_scene(QPointF(350.0, 90.0), Qt::ControlModifier);
+    click_scene(QPointF(150.0, 90.0));
+    click_scene(QPointF(350.0, 126.0), Qt::ControlModifier);
     CHECK(selected_ids(scene) == first_two);
-    click_scene(QPointF(150.0, 54.0), Qt::ControlModifier);
+    click_scene(QPointF(150.0, 90.0), Qt::ControlModifier);
     CHECK(selected_ids(scene) == QVector<ClipId>{ClipId(202)});
     CHECK(inspected_clip == ClipId(202));
-    click_scene(QPointF(350.0, 90.0), Qt::ControlModifier);
+    click_scene(QPointF(350.0, 126.0), Qt::ControlModifier);
     CHECK(!scene.HasSelectedClips());
     CHECK(!inspected_clip.has_value());
-    click_scene(QPointF(150.0, 54.0), Qt::ControlModifier);
-    click_scene(QPointF(350.0, 90.0), Qt::ControlModifier);
-    click_scene(QPointF(700.0, 90.0), Qt::ControlModifier);
+    click_scene(QPointF(150.0, 90.0), Qt::ControlModifier);
+    click_scene(QPointF(350.0, 126.0), Qt::ControlModifier);
+    click_scene(QPointF(700.0, 126.0), Qt::ControlModifier);
     CHECK(selected_ids(scene) == first_two);
 
     // Right-clicking a selected card or empty space retains the whole group.
-    click_scene(QPointF(150.0, 54.0), Qt::NoModifier, Qt::RightButton);
+    click_scene(QPointF(150.0, 90.0), Qt::NoModifier, Qt::RightButton);
     CHECK(selected_ids(scene) == first_two);
-    click_scene(QPointF(700.0, 90.0), Qt::NoModifier, Qt::RightButton);
+    click_scene(QPointF(700.0, 126.0), Qt::NoModifier, Qt::RightButton);
     CHECK(selected_ids(scene) == first_two);
-    click_scene(QPointF(550.0, 54.0), Qt::NoModifier, Qt::RightButton);
+    click_scene(QPointF(550.0, 90.0), Qt::NoModifier, Qt::RightButton);
     CHECK(selected_ids(scene) == QVector<ClipId>{ClipId(203)});
 
     // Selection updates as the rectangle grows, shrinks, and is released.
-    send_mouse_event(QEvent::GraphicsSceneMousePress, QPointF(80.0, 37.0),
+    send_mouse_event(QEvent::GraphicsSceneMousePress, QPointF(80.0, 73.0),
         Qt::LeftButton, Qt::LeftButton);
     CHECK(!scene.HasSelectedClips());
-    send_mouse_event(QEvent::GraphicsSceneMouseMove, QPointF(400.0, 107.0),
+    send_mouse_event(QEvent::GraphicsSceneMouseMove, QPointF(400.0, 143.0),
         Qt::NoButton, Qt::LeftButton);
     CHECK(selected_ids(scene) == first_two);
-    send_mouse_event(QEvent::GraphicsSceneMouseMove, QPointF(220.0, 71.0),
+    send_mouse_event(QEvent::GraphicsSceneMouseMove, QPointF(220.0, 107.0),
         Qt::NoButton, Qt::LeftButton);
     CHECK(selected_ids(scene) == QVector<ClipId>{ClipId(201)});
-    send_mouse_event(QEvent::GraphicsSceneMouseRelease, QPointF(400.0, 107.0),
+    send_mouse_event(QEvent::GraphicsSceneMouseRelease, QPointF(400.0, 143.0),
         Qt::LeftButton, Qt::NoButton);
     CHECK(selected_ids(scene) == first_two);
 
     // Reverse drags and partial intersections work on multiple lanes.
-    box_select(QPointF(470.0, 110.0), QPointF(130.0, 40.0));
+    box_select(QPointF(470.0, 146.0), QPointF(130.0, 76.0));
     CHECK(selected_ids(scene) == first_two);
-    box_select(QPointF(490.0, 37.0), QPointF(610.0, 71.0));
+    box_select(QPointF(490.0, 73.0), QPointF(610.0, 107.0));
     CHECK(selected_ids(scene) == QVector<ClipId>{ClipId(203)});
-    box_select(QPointF(80.0, 37.0), QPointF(400.0, 107.0), Qt::ControlModifier);
+    box_select(QPointF(80.0, 73.0), QPointF(400.0, 143.0), Qt::ControlModifier);
     CHECK(selected_ids(scene) == first_three);
-    click_scene(QPointF(550.0, 54.0));
+    click_scene(QPointF(550.0, 90.0));
     CHECK(selected_ids(scene) == QVector<ClipId>{ClipId(203)});
-    send_mouse_event(QEvent::GraphicsSceneMousePress, QPointF(80.0, 37.0),
+    send_mouse_event(QEvent::GraphicsSceneMousePress, QPointF(80.0, 73.0),
         Qt::LeftButton, Qt::LeftButton, Qt::ControlModifier);
-    send_mouse_event(QEvent::GraphicsSceneMouseMove, QPointF(400.0, 107.0),
+    send_mouse_event(QEvent::GraphicsSceneMouseMove, QPointF(400.0, 143.0),
         Qt::NoButton, Qt::LeftButton, Qt::ControlModifier);
     CHECK(selected_ids(scene) == first_three);
-    send_mouse_event(QEvent::GraphicsSceneMouseRelease, QPointF(80.0, 110.0),
+    send_mouse_event(QEvent::GraphicsSceneMouseRelease, QPointF(80.0, 146.0),
         Qt::LeftButton, Qt::NoButton, Qt::ControlModifier);
     CHECK(selected_ids(scene) == QVector<ClipId>{ClipId(203)});
-    click_scene(QPointF(700.0, 90.0));
+    click_scene(QPointF(700.0, 126.0));
     CHECK(!scene.HasSelectedClips());
     CHECK(!scene.CopySelectedClips());
 
     // A click with small pointer jitter does not accidentally select a card.
-    box_select(QPointF(99.0, 37.0), QPointF(101.0, 39.0));
+    box_select(QPointF(99.0, 73.0), QPointF(101.0, 75.0));
     CHECK(!scene.HasSelectedClips());
     // Select even the visible tail of a 1 ms clip, but never hidden lanes.
-    box_select(QPointF(104.0, 109.0), QPointF(110.0, 140.0));
+    box_select(QPointF(104.0, 145.0), QPointF(110.0, 176.0));
     CHECK(selected_ids(scene) == QVector<ClipId>{ClipId(204)});
     scene.SetVisibleLanes({0, 1});
-    box_select(QPointF(80.0, 37.0), QPointF(610.0, 144.0));
+    box_select(QPointF(80.0, 73.0), QPointF(610.0, 180.0));
     CHECK(selected_ids(scene) == first_three);
     CHECK(timeline_change_count == changes_before_selection);
     const auto after_selection = scene.PersistentTimelineClips();
@@ -452,22 +453,22 @@ int main(int argc, char** argv)
                 QPointF(view.viewport()->mapToGlobal(local)), button, buttons, modifiers);
             QCoreApplication::sendEvent(view.viewport(), &event);
         };
-    send_view_mouse(QEvent::MouseButtonPress, QPointF(980.0, 37.0),
+    send_view_mouse(QEvent::MouseButtonPress, QPointF(980.0, 73.0),
         Qt::LeftButton, Qt::LeftButton);
-    send_view_mouse(QEvent::MouseMove, QPointF(1420.0, 107.0),
+    send_view_mouse(QEvent::MouseMove, QPointF(1420.0, 143.0),
         Qt::NoButton, Qt::LeftButton);
     CHECK(view_scene->selectedItems().size() == 2);
-    send_view_mouse(QEvent::MouseButtonRelease, QPointF(1420.0, 107.0),
+    send_view_mouse(QEvent::MouseButtonRelease, QPointF(1420.0, 143.0),
         Qt::LeftButton, Qt::NoButton);
     CHECK(view_scene->selectedItems().size() == 2);
-    send_view_mouse(QEvent::MouseButtonPress, QPointF(1050.0, 54.0),
+    send_view_mouse(QEvent::MouseButtonPress, QPointF(1050.0, 90.0),
         Qt::LeftButton, Qt::LeftButton, Qt::ControlModifier);
-    send_view_mouse(QEvent::MouseButtonRelease, QPointF(1050.0, 54.0),
+    send_view_mouse(QEvent::MouseButtonRelease, QPointF(1050.0, 90.0),
         Qt::LeftButton, Qt::NoButton, Qt::ControlModifier);
     CHECK(selected_ids(*view_scene) == QVector<ClipId>{ClipId(302)});
-    send_view_mouse(QEvent::MouseButtonPress, QPointF(1050.0, 54.0),
+    send_view_mouse(QEvent::MouseButtonPress, QPointF(1050.0, 90.0),
         Qt::LeftButton, Qt::LeftButton, Qt::ControlModifier);
-    send_view_mouse(QEvent::MouseButtonRelease, QPointF(1050.0, 54.0),
+    send_view_mouse(QEvent::MouseButtonRelease, QPointF(1050.0, 90.0),
         Qt::LeftButton, Qt::NoButton, Qt::ControlModifier);
     CHECK(view_scene->selectedItems().size() == 2);
 
@@ -520,16 +521,20 @@ int main(int argc, char** argv)
     CHECK(!view_scene->HasSelectedClips());
 
     // Rebuilding the layout during a gesture clears its transient state.
-    send_mouse_event(QEvent::GraphicsSceneMousePress, QPointF(80.0, 37.0),
+    send_mouse_event(QEvent::GraphicsSceneMousePress, QPointF(80.0, 73.0),
         Qt::LeftButton, Qt::LeftButton, Qt::ControlModifier);
-    send_mouse_event(QEvent::GraphicsSceneMouseMove, QPointF(400.0, 107.0),
+    send_mouse_event(QEvent::GraphicsSceneMouseMove, QPointF(400.0, 143.0),
         Qt::NoButton, Qt::LeftButton, Qt::ControlModifier);
     scene.ClearTimelineClips();
-    send_mouse_event(QEvent::GraphicsSceneMouseRelease, QPointF(400.0, 107.0),
+    send_mouse_event(QEvent::GraphicsSceneMouseRelease, QPointF(400.0, 143.0),
         Qt::LeftButton, Qt::NoButton, Qt::ControlModifier);
     CHECK(!scene.HasSelectedClips());
     CHECK(scene.PersistentTimelineClips().isEmpty());
 
 #undef CHECK
-    return RunTimelineDragTests();
+    if(const int result = RunTimelineDragTests(); result != 0)
+    {
+        return result;
+    }
+    return RunTimelineWaveformTests();
 }

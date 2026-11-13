@@ -20,6 +20,8 @@
 #include <QStyleOptionViewItem>
 #include <QStyledItemDelegate>
 #include <QTreeWidgetItem>
+#include <QTimer>
+#include <QTreeWidgetItemIterator>
 #include <QWheelEvent>
 
 #include <array>
@@ -701,7 +703,8 @@ LaneListWidget::LaneListWidget(QWidget* parent) :
     setRootIsDecorated(true);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setSelectionMode(QAbstractItemView::NoSelection);
-    setUniformRowHeights(true);
+    // The music row is taller than device lanes.
+    setUniformRowHeights(false);
     setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     setItemDelegate(new LaneItemDelegate(this));
 
@@ -711,7 +714,7 @@ LaneListWidget::LaneListWidget(QWidget* parent) :
         this,
         [this](QTreeWidgetItem*)
         {
-            NotifyVisibleLanesChanged();
+            HandleExpansionChanged();
         });
     connect(
         this,
@@ -719,7 +722,7 @@ LaneListWidget::LaneListWidget(QWidget* parent) :
         this,
         [this](QTreeWidgetItem*)
         {
-            NotifyVisibleLanesChanged();
+            HandleExpansionChanged();
         });
     connect(
         this,
@@ -742,7 +745,7 @@ void LaneListWidget::SetLanes(const QVector<TimelineLane>& lanes)
     music_item->setFlags(Qt::ItemIsEnabled);
     music_item->setSizeHint(
         0,
-        QSize(0, static_cast<int>(ROW_HEIGHT)));
+        QSize(0, static_cast<int>(MUSIC_ROW_HEIGHT)));
     music_item->setToolTip(0, "Music");
 
     QTreeWidgetItem* controller_item = nullptr;
@@ -781,6 +784,7 @@ void LaneListWidget::SetLanes(const QVector<TimelineLane>& lanes)
             LaneCommittedActionStateRole,
             action_state);
         item->setData(0, LaneLedCountRole, lane.led_count);
+        item->setData(0, LaneHiddenRole, lane.hidden);
         item->setFlags(Qt::ItemIsEnabled);
         item->setSizeHint(
             0,
@@ -808,6 +812,61 @@ void LaneListWidget::SetLanes(const QVector<TimelineLane>& lanes)
         ApplyZeroLedFilter(topLevelItem(i));
     }
     rebuilding = false;
+    if(expansion_changed_callback)
+    {
+        expansion_changed_callback(AnyDeviceExpanded());
+    }
+}
+
+void LaneListWidget::SetAllExpanded(bool expanded)
+{
+    rebuilding = true;
+    if(expanded)
+    {
+        expandAll();
+    }
+    else
+    {
+        collapseAll();
+    }
+    rebuilding = false;
+    HandleExpansionChanged();
+}
+
+bool LaneListWidget::AnyDeviceExpanded() const
+{
+    for(int i = 0; i < topLevelItemCount(); ++i)
+    {
+        const QTreeWidgetItem* item = topLevelItem(i);
+        if(item->childCount() > 0 && item->isExpanded())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void LaneListWidget::SetExpansionChangedCallback(
+    std::function<void(bool)> callback)
+{
+    expansion_changed_callback = std::move(callback);
+    if(expansion_changed_callback)
+    {
+        expansion_changed_callback(AnyDeviceExpanded());
+    }
+}
+
+void LaneListWidget::HandleExpansionChanged()
+{
+    if(rebuilding)
+    {
+        return;
+    }
+    NotifyVisibleLanesChanged();
+    if(expansion_changed_callback)
+    {
+        expansion_changed_callback(AnyDeviceExpanded());
+    }
 }
 
 void LaneListWidget::SetVisibilityChangedCallback(
@@ -842,6 +901,25 @@ void LaneListWidget::SetLaneDisabledCallback(
     TimelineEditor::LaneStateChangedCallback callback)
 {
     lane_disabled_callback = std::move(callback);
+}
+
+void LaneListWidget::SetHideDisabledLanes(bool hide)
+{
+    if(hide_disabled_lanes == hide)
+    {
+        return;
+    }
+    hide_disabled_lanes = hide;
+    ReapplyFilters();
+}
+
+void LaneListWidget::ReapplyFilters()
+{
+    for(int i = 0; i < topLevelItemCount(); ++i)
+    {
+        ApplyZeroLedFilter(topLevelItem(i));
+    }
+    NotifyVisibleLanesChanged();
 }
 
 void LaneListWidget::SetHideZeroLedZones(bool hide)
@@ -950,8 +1028,44 @@ bool LaneListWidget::ApplyZeroLedFilter(QTreeWidgetItem* item)
         || (item->childCount() > 0
             ? has_visible_child
             : item->data(0, LaneLedCountRole).toInt() > 0);
-    item->setHidden(hide_zero_led_zones && !visible);
-    return !hide_zero_led_zones || visible;
+    // Devices the user chose to hide stay hidden regardless of the
+    // zero-LED filter; disabled lanes hide when that filter is on.
+    const bool user_hidden = item->data(0, LaneHiddenRole).toBool();
+    const bool disabled =
+        (item->data(0, LaneActionStateRole).toInt() & 2) != 0;
+    const bool shown = !user_hidden
+        && !(hide_disabled_lanes && disabled)
+        && (!hide_zero_led_zones || visible);
+    item->setHidden(!shown);
+    return shown;
+}
+
+void LaneListWidget::SetLaneHidden(int lane_index, bool hidden)
+{
+    QTreeWidgetItemIterator iterator(this);
+    while(*iterator != nullptr)
+    {
+        QTreeWidgetItem* item = *iterator;
+        if(item->data(0, LaneIndexRole).toInt() == lane_index
+            && item->data(0, LaneIndexRole).isValid())
+        {
+            if(item->data(0, LaneHiddenRole).toBool() == hidden)
+            {
+                return;
+            }
+            item->setData(0, LaneHiddenRole, hidden);
+            QTreeWidgetItem* top = item;
+            while(top->parent() != nullptr)
+            {
+                top = top->parent();
+            }
+            ApplyZeroLedFilter(top);
+            NotifyVisibleLanesChanged();
+            HandleExpansionChanged();
+            return;
+        }
+        ++iterator;
+    }
 }
 
 void LaneListWidget::HandleItemChanged(
@@ -1041,6 +1155,12 @@ void LaneListWidget::HandleItemChanged(
         LaneCommittedActionStateRole,
         committed_state);
     item->setData(0, LaneActionStateRole, committed_state);
+
+    if(hide_disabled_lanes && (committed_state & 2) != 0)
+    {
+        // Hide the newly disabled lane after the click has been handled.
+        QTimer::singleShot(0, this, [this]() { ReapplyFilters(); });
+    }
 }
 
 void LaneListWidget::NotifyVisibleLanesChanged()

@@ -20,6 +20,7 @@ public:
     qint64 duration_ms = 0;
     bool engine_ready = false;
     bool sound_ready = false;
+    double playback_rate = 1.0;
 };
 
 MiniaudioAudioService::MiniaudioAudioService() :
@@ -83,6 +84,9 @@ bool MiniaudioAudioService::Open(const QString& path)
     }
 
     impl_->sound_ready = true;
+    ma_sound_set_pitch(
+        &impl_->sound,
+        static_cast<float>(impl_->playback_rate));
     float duration_seconds = 0.0f;
     if(ma_sound_get_length_in_seconds(
         &impl_->sound,
@@ -189,4 +193,24 @@ QVector<qreal> MiniaudioAudioService::AnalyzeWaveform(
         bar_count);
 }
 
+}
+
+namespace lighttrack::audio
+{
+WaveformPeaks MiniaudioAudioService::AnalyzeWaveformPeaks(
+    const QString& path) const
+{
+    return lighttrack::audio::AnalyzeWaveformPeaks(path);
+}
+
+void MiniaudioAudioService::SetPlaybackRate(double rate)
+{
+    impl_->playback_rate = rate > 0.0 ? rate : 1.0;
+    if(impl_->sound_ready)
+    {
+        ma_sound_set_pitch(
+            &impl_->sound,
+            static_cast<float>(impl_->playback_rate));
+    }
+}
 }

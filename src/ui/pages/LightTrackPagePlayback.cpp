@@ -1,9 +1,13 @@
 #include "ui/pages/LightTrackPagePrivate.h"
 
+#include "integrations/openrgb/PerformanceStats.h"
 #include "ui/timeline/TimelineEditor.h"
 
+#include <QAction>
 #include <QFileDialog>
+#include <QMenu>
 #include <QFileInfo>
+#include <QLabel>
 #include <QPushButton>
 #include <QTimer>
 
@@ -26,11 +30,20 @@ void LightTrackPage::UpdateMinimumTimelineDuration()
         content_duration_ms);
 }
 
+// The lights are live from Play (or the first seek) until Stop, the end of
+// the music, or an error. While paused they keep showing the playhead
+// position, so seeking previews the timeline.
 void LightTrackPage::StartRuntime(qint64 position_ms)
 {
+    // Keep the separate Effects plugin off the controllers while
+    // LightTrack is driving them.
+    external_effects.Suspend();
+    output_active = true;
     backend.StartRuntime(
         position_ms,
-        timeline_editor->TimelineClips());
+        timeline_editor->TimelineClips(),
+        !music_playing,
+        playback_rate);
     ScheduleRuntimeBoundary(position_ms);
 }
 
@@ -38,13 +51,17 @@ void LightTrackPage::StopRuntime()
 {
     runtime_boundary_timer->stop();
     backend.StopRuntime();
+    output_active = false;
+    external_effects.Resume();
 }
 
 void LightTrackPage::SyncRuntime(qint64 position_ms)
 {
     backend.SyncRuntime(
         position_ms,
-        timeline_editor->TimelineClips());
+        timeline_editor->TimelineClips(),
+        !music_playing,
+        playback_rate);
     ScheduleRuntimeBoundary(position_ms);
 }
 
@@ -75,9 +92,11 @@ void LightTrackPage::ScheduleRuntimeBoundary(qint64 position_ms)
         return;
     }
 
+    // Song time runs slower in slow play.
     const qint64 delay_ms = qBound<qint64>(
         qint64{1},
-        next_boundary_ms - position_ms,
+        static_cast<qint64>(
+            (next_boundary_ms - position_ms) / playback_rate),
         static_cast<qint64>(std::numeric_limits<int>::max()));
     runtime_boundary_timer->start(static_cast<int>(delay_ms));
 }
@@ -132,6 +151,10 @@ bool LightTrackPage::SetMusicFile(
         audio_service.AnalyzeWaveform(
             path,
             MUSIC_SPECTRUM_BARS);
+    // Detailed left/right peaks for the music track.
+    timeline_editor->SetMusicPeaks(
+        audio_service.AnalyzeWaveformPeaks(path));
+    UpdateTimeDisplay(0);
     timeline_editor->SetMusicSpectrum(
         music_spectrum_preview,
         music_duration_ms);
@@ -173,6 +196,7 @@ bool LightTrackPage::OpenMusic(const QString& path)
 
     music_duration_ms = audio_service.DurationMs();
     music_loaded = true;
+    scrubber.Load(path);
     return true;
 }
 
@@ -190,6 +214,8 @@ void LightTrackPage::PlayMusic()
         timeline_editor->SetMusicPosition(0);
     }
 
+    scrub_stop_timer->stop();
+    scrubber.Stop();
     if(!audio_service.Play())
     {
         MarkMusicError();
@@ -198,6 +224,8 @@ void LightTrackPage::PlayMusic()
 
     music_timer->start();
     music_playing = true;
+    openrgb::performance::Reset();
+    diagnostics->Start();
     SetPlaybackControls(true, true);
     StartRuntime(MusicPositionMs());
 }
@@ -240,6 +268,7 @@ void LightTrackPage::StopMusic()
     music_playing = false;
     SetPlaybackControls(true, false);
     timeline_editor->SetMusicPosition(0);
+    UpdateTimeDisplay(0);
     StopRuntime();
 }
 
@@ -265,10 +294,14 @@ void LightTrackPage::SeekMusic(qint64 position_ms)
     }
 
     timeline_editor->SetMusicPosition(clamped_position);
-    if(music_playing)
+    UpdateTimeDisplay(clamped_position);
+    if(!music_playing)
     {
-        StartRuntime(clamped_position);
+        // Dragging the playhead while paused: vinyl-style scrub sound.
+        scrubber.ScrubTo(clamped_position);
+        scrub_stop_timer->start();
     }
+    StartRuntime(clamped_position);
 }
 
 void LightTrackPage::UpdateMusicPosition()
@@ -293,13 +326,15 @@ void LightTrackPage::UpdateMusicPosition()
     }
 
     timeline_editor->SetMusicPosition(position, music_playing);
+    UpdateTimeDisplay(position);
     if(music_playing)
     {
         SyncRuntime(position);
     }
-    else
+    else if(output_active)
     {
-        StopRuntime();
+        // Paused: hold the lights at the playhead.
+        StartRuntime(position);
     }
 }
 
@@ -310,6 +345,9 @@ qint64 LightTrackPage::MusicPositionMs() const
 
 void LightTrackPage::CloseMusic()
 {
+    timeline_editor->SetMusicPeaks({});
+    scrub_stop_timer->stop();
+    scrubber.Unload();
     StopRuntime();
     music_timer->stop();
     music_spectrum_preview.clear();
@@ -329,6 +367,7 @@ void LightTrackPage::FinishMusicPlayback()
     music_playing = false;
     SetPlaybackControls(true, false);
     timeline_editor->SetMusicPosition(music_duration_ms);
+    UpdateTimeDisplay(music_duration_ms);
     StopRuntime();
 }
 
@@ -357,10 +396,64 @@ void LightTrackPage::MarkMusicError()
         music_path + "\nCannot play this file");
 }
 
+void LightTrackPage::SetWaveformStyle(
+    WaveformStyle style,
+    bool record_history)
+{
+    const bool changed = waveform_style != style;
+    waveform_style = style;
+    timeline_editor->SetWaveformStyle(style);
+    for(QAction* action : waveform_menu->actions())
+    {
+        action->setChecked(
+            action->data().toInt() == static_cast<int>(style));
+    }
+    if(changed && record_history)
+    {
+        CommitHistorySnapshot();
+    }
+}
+
+void LightTrackPage::UpdateTimeDisplay(qint64 position_ms)
+{
+    if(transport_time_label == nullptr)
+    {
+        return;
+    }
+    const qint64 clamped = qMax<qint64>(0, position_ms);
+    const QChar zero('0');
+    transport_time_label->setText(QString("%1:%2:%3.%4")
+        .arg(clamped / 3600000, 2, 10, zero)
+        .arg((clamped / 60000) % 60, 2, 10, zero)
+        .arg((clamped / 1000) % 60, 2, 10, zero)
+        .arg(clamped % 1000, 3, 10, zero));
+}
+
+void LightTrackPage::SetPlaybackRate(double rate)
+{
+    playback_rate = rate > 0.0 ? rate : 1.0;
+    audio_service.SetPlaybackRate(playback_rate);
+    toolbar_speed_button->setText(QString("%1x").arg(playback_rate));
+    for(QAction* action : speed_menu->actions())
+    {
+        action->setChecked(action->data().toDouble() == playback_rate);
+    }
+    if(output_active)
+    {
+        // Re-time the running clips at the new speed.
+        StartRuntime(MusicPositionMs());
+    }
+}
+
 void LightTrackPage::SetPlaybackControls(
     bool enabled,
     bool playing)
 {
+    if(!playing)
+    {
+        diagnostics->Stop();
+        openrgb::performance::WriteReport();
+    }
     toolbar_play_button->setEnabled(enabled && !playing);
     toolbar_pause_button->setEnabled(enabled && playing);
     toolbar_stop_button->setEnabled(enabled);

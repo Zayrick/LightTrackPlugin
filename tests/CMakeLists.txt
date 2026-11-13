@@ -26,6 +26,8 @@ add_executable(lighttrack_openrgb_runtime_tests
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbEffectManager.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbRenderCoordinator.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbColorRouter.cpp"
+  "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/PlaybackDiagnostics.cpp"
+  "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/PerformanceStats.cpp"
   "${OPENRGB_DIR}/qt/hsv.cpp"
   "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorUtils.cpp"
   "${OPENRGB_EFFECTS_PLUGIN_DIR}/ControllerZone.cpp"
@@ -47,9 +49,36 @@ set_target_properties(lighttrack_openrgb_runtime_tests PROPERTIES
   AUTOMOC ON
 )
 
+add_executable(lighttrack_effects_tests
+  LightTrackEffectsTests.cpp
+  "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/effects/ClipTimedEffect.h"
+  "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/effects/LightTrackEffects.cpp"
+  "${OPENRGB_DIR}/qt/hsv.cpp"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorUtils.cpp"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ControllerZone.cpp"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectListManager.cpp"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/RGBEffect.h"
+)
+target_include_directories(lighttrack_effects_tests PRIVATE
+  "${PROJECT_SOURCE_DIR}/src"
+  "${OPENRGB_DIR}"
+  "${OPENRGB_DIR}/RGBController"
+  "${OPENRGB_DIR}/dependencies/json"
+  "${OPENRGB_DIR}/qt"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects"
+)
+target_link_libraries(lighttrack_effects_tests PRIVATE
+  "Qt${QT_VERSION_MAJOR}::Widgets"
+)
+set_target_properties(lighttrack_effects_tests PROPERTIES
+  AUTOMOC ON
+)
+
 add_executable(lighttrack_timeline_tests
   TimelineClipboardTests.cpp
   TimelineDragTests.cpp
+  TimelineWaveformTests.cpp
   "${PROJECT_SOURCE_DIR}/src/ui/UiHelpers.h"
   "${PROJECT_SOURCE_DIR}/src/ui/timeline/TimelineEditor.h"
   "${PROJECT_SOURCE_DIR}/src/ui/timeline/TimelineEditor.cpp"
@@ -60,6 +89,7 @@ add_executable(lighttrack_timeline_tests
   "${PROJECT_SOURCE_DIR}/src/ui/timeline/internal/TimelineEditorScene.cpp"
   "${PROJECT_SOURCE_DIR}/src/ui/timeline/internal/TimelineEditorPanels.cpp"
   "${PROJECT_SOURCE_DIR}/src/ui/timeline/internal/TimelineEditorView.cpp"
+  "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/PerformanceStats.cpp"
 )
 target_include_directories(lighttrack_timeline_tests PRIVATE
   "${PROJECT_SOURCE_DIR}/src"
@@ -76,6 +106,7 @@ if(MSVC)
       lighttrack_history_tests
       lighttrack_persistence_tests
       lighttrack_openrgb_runtime_tests
+      lighttrack_effects_tests
       lighttrack_timeline_tests)
     target_compile_options(${test_target} PRIVATE /EHsc)
   endforeach()
@@ -141,6 +172,13 @@ if(WIN32)
       $<TARGET_FILE:lighttrack_openrgb_runtime_tests>
   )
   add_test(
+    NAME lighttrack.effects
+    COMMAND ${CMAKE_COMMAND} -E env
+      "QT_QPA_PLATFORM=offscreen"
+      "PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Widgets>;$ENV{PATH}"
+      $<TARGET_FILE:lighttrack_effects_tests>
+  )
+  add_test(
     NAME lighttrack.timeline
     COMMAND ${CMAKE_COMMAND} -E env
       "QT_QPA_PLATFORM=offscreen"
@@ -157,6 +195,12 @@ else()
     COMMAND ${CMAKE_COMMAND} -E env
       "QT_QPA_PLATFORM=offscreen"
       $<TARGET_FILE:lighttrack_openrgb_runtime_tests>
+  )
+  add_test(
+    NAME lighttrack.effects
+    COMMAND ${CMAKE_COMMAND} -E env
+      "QT_QPA_PLATFORM=offscreen"
+      $<TARGET_FILE:lighttrack_effects_tests>
   )
   add_test(
     NAME lighttrack.timeline

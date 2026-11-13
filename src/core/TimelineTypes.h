@@ -51,6 +51,8 @@ struct TimelineLane
     bool highlighted = false;
     bool disabled = false;
     int led_count = 0;
+    // Hidden from the timeline view (clips still play).
+    bool hidden = false;
 };
 
 struct TimelineClip
@@ -60,5 +62,7 @@ struct TimelineClip
     int lane_index = -1;
     qint64 start_ms = 0;
     qint64 end_ms = 0;
+    // Clips sharing a non-zero group id select and move together.
+    quint64 group_id = 0;
 };
 }

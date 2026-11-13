@@ -68,7 +68,13 @@ public:
     zone GetZone(unsigned int index) override { return setup.zones.at(index); }
     unsigned int GetZoneCount() override { return static_cast<unsigned int>(setup.zones.size()); }
     std::string GetZoneName(unsigned int index) override { return setup.zones.at(index).name; }
-    std::string GetZoneDisplayName(unsigned int index) override { return GetZoneName(index); }
+    std::string GetZoneDisplayName(unsigned int index) override
+    {
+        const zone& value = setup.zones.at(index);
+        return (value.flags & ZONE_FLAG_MANUALLY_CONFIGURED_NAME)
+            ? value.display_name
+            : value.name;
+    }
     zone_type GetZoneType(unsigned int index) override { return setup.zones.at(index).type; }
     zone_flags GetZoneFlags(unsigned int index) override { return setup.zones.at(index).flags; }
     unsigned int GetZoneLEDsCount(unsigned int index) override { return setup.zones.at(index).leds_count; }

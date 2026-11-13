@@ -1,6 +1,7 @@
 #include "EffectManager.h"
 
 #include "integrations/openrgb/OpenRgbRenderCoordinator.h"
+#include "integrations/openrgb/PerformanceStats.h"
 
 #include <algorithm>
 #include <chrono>
@@ -271,24 +272,40 @@ void EffectManager::EffectThreadFunction(RGBEffect* effect)
         int total_duration = 0;
 
         {
-            std::unique_lock<std::mutex> state_guard(lock);
-            if(EffectThreads.find(effect) == EffectThreads.end())
+            std::vector<ControllerZone*> controller_zones;
             {
-                break;
+                std::unique_lock<std::mutex> state_guard(lock);
+                if(EffectThreads.find(effect) == EffectThreads.end())
+                {
+                    break;
+                }
+
+                controller_zones = effect_zones[effect];
+                const auto preview = previews.find(effect);
+                if(preview != previews.end())
+                {
+                    controller_zones.push_back(preview->second);
+                }
             }
 
-            std::vector<ControllerZone*> controller_zones =
-                effect_zones[effect];
-            const auto preview = previews.find(effect);
-            if(preview != previews.end())
+            // Compute the frame outside the frame/state locks: in LightTrack
+            // every effect draws into its own per-clip layer buffer, and those
+            // buffers are only destroyed after this thread has been joined.
+            // Holding the frame lock here made the UI thread wait for every
+            // effect. Effects still step one at a time (like upstream, whose
+            // effects may share global state), on a lock only they use.
+            namespace perf = lighttrack::openrgb::performance;
+            const perf::Clock::time_point wait_step_start = perf::Clock::now();
+            double wait_step_ms = 0.0;
+            double step_ms = 0.0;
             {
-                controller_zones.push_back(preview->second);
+                static std::mutex step_mutex;
+                std::lock_guard<std::mutex> step_guard(step_mutex);
+                wait_step_ms = perf::MsSince(wait_step_start);
+                const perf::Clock::time_point step_start = perf::Clock::now();
+                effect->StepEffect(controller_zones);
+                step_ms = perf::MsSince(step_start);
             }
-
-            std::lock_guard<std::mutex> frame_guard(
-                lighttrack::openrgb::ControllerFrameMutex());
-            lighttrack::openrgb::SetCurrentRenderingEffect(effect);
-            effect->StepEffect(controller_zones);
 
             std::set<RGBControllerInterface*> controllers;
             for(ControllerZone* controller_zone : controller_zones)
@@ -299,11 +316,31 @@ void EffectManager::EffectThreadFunction(RGBEffect* effect)
                     controllers.insert(controller_zone->controller);
                 }
             }
-            for(RGBControllerInterface* controller : controllers)
+
+            // Publishing composes the device frames: keep that serialized.
+            const perf::Clock::time_point wait_publish_start = perf::Clock::now();
+            double wait_publish_ms = 0.0;
+            double publish_ms = 0.0;
             {
-                controller->UpdateLEDs();
+                std::lock_guard<std::mutex> frame_guard(
+                    lighttrack::openrgb::ControllerFrameMutex());
+                wait_publish_ms = perf::MsSince(wait_publish_start);
+                const perf::Clock::time_point publish_start = perf::Clock::now();
+                lighttrack::openrgb::SetCurrentRenderingEffect(effect);
+                for(RGBControllerInterface* controller : controllers)
+                {
+                    controller->UpdateLEDs();
+                }
+                lighttrack::openrgb::SetCurrentRenderingEffect(nullptr);
+                publish_ms = perf::MsSince(publish_start);
             }
-            lighttrack::openrgb::SetCurrentRenderingEffect(nullptr);
+            perf::RecordEffectFrame(
+                effect->EffectDetails.EffectClassName,
+                effect->GetFPS(),
+                wait_step_ms,
+                step_ms,
+                wait_publish_ms,
+                publish_ms);
 
             const TCount end = clock->now();
             fps = static_cast<int>(std::max(1U, effect->GetFPS()));

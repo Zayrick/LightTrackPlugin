@@ -1,5 +1,6 @@
 #include "TimelineEditorInternal.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QClipboard>
 #include <QGuiApplication>
@@ -10,15 +11,19 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QMimeData>
 #include <QPainter>
 #include <QPen>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QStringList>
 #include <QUuid>
 
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <set>
 #include <optional>
 #include <utility>
 
@@ -36,6 +41,7 @@ struct ClipboardClip
     int lane_index = -1;
     qint64 start_ms = 0;
     qint64 end_ms = 0;
+    quint64 group_id = 0;
 };
 
 struct ClipboardPayload
@@ -67,6 +73,12 @@ QByteArray EncodeClipboardPayload(
         clip_value.insert(
             QStringLiteral("endMs"),
             QString::number(clip.end_ms));
+        if(clip.group_id != 0)
+        {
+            clip_value.insert(
+                QStringLiteral("group"),
+                QString::number(clip.group_id));
+        }
         clip_values.push_back(clip_value);
     }
 
@@ -162,7 +174,10 @@ std::optional<ClipboardPayload> DecodeClipboardPayload(
             effect_id,
             lane_index,
             start_ms,
-            end_ms
+            end_ms,
+            clip_value.value(QStringLiteral("group"))
+                .toString()
+                .toULongLong()
         });
     }
     return payload;
@@ -276,6 +291,24 @@ void LightTrackScene::SetMusicPosition(qint64 position_ms)
     UpdatePlayhead();
 }
 
+void LightTrackScene::SetMusicPeaks(const WaveformPeaks& peaks)
+{
+    music_peaks = peaks;
+    if(music_item != nullptr)
+    {
+        music_item->SetPeaks(music_peaks);
+    }
+}
+
+void LightTrackScene::SetWaveformStyle(WaveformStyle style)
+{
+    waveform_style = style;
+    if(music_item != nullptr)
+    {
+        music_item->SetStyle(style);
+    }
+}
+
 void LightTrackScene::SetMinimumContentDuration(qint64 duration_ms)
 {
     const qint64 clamped_duration_ms = qMax<qint64>(0, duration_ms);
@@ -329,7 +362,8 @@ ClipId LightTrackScene::RestoreClip(
     int lane,
     qint64 start_ms,
     qint64 end_ms,
-    ClipId requested_id)
+    ClipId requested_id,
+    quint64 group_id)
 {
     const EffectDescriptor* effect = FindEffect(effect_id);
     if(effect == nullptr
@@ -346,6 +380,10 @@ ClipId LightTrackScene::RestoreClip(
         (end_ms - start_ms) * pixels_per_second / 1000.0;
     TimelineClipItem* clip =
         AddClip(*effect, lane, x, width, false, false, requested_id);
+    if(clip != nullptr)
+    {
+        clip->SetGroupId(group_id);
+    }
     return clip == nullptr ? ClipId{} : clip->Id();
 }
 
@@ -580,6 +618,7 @@ bool LightTrackScene::PasteCopiedClips()
         int lane_index = -1;
         qreal x = 0.0;
         qreal width = CLIP_DEFAULT_WIDTH;
+        quint64 group_id = 0;
     };
 
     QVector<PendingPaste> pending_clips;
@@ -605,7 +644,8 @@ bool LightTrackScene::PasteCopiedClips()
             *effect,
             copied_clip.lane_index,
             start_ms * pixels_per_second / 1000.0,
-            duration_ms * pixels_per_second / 1000.0
+            duration_ms * pixels_per_second / 1000.0,
+            copied_clip.group_id
         });
     }
 
@@ -619,6 +659,9 @@ bool LightTrackScene::PasteCopiedClips()
     const bool same_editor =
         payload->source_editor_id == clipboard_source_id;
     TimelineClipItem* last_added_clip = nullptr;
+    // Copied groups become new groups of the pasted clips.
+    std::map<quint64, quint64> pasted_groups;
+    quint64 next_group = NextGroupId();
     for(const PendingPaste& pending : pending_clips)
     {
         TimelineClipItem* clip = AddClip(
@@ -634,6 +677,16 @@ bool LightTrackScene::PasteCopiedClips()
             continue;
         }
 
+        if(pending.group_id != 0)
+        {
+            auto group = pasted_groups.find(pending.group_id);
+            if(group == pasted_groups.end())
+            {
+                group = pasted_groups.emplace(
+                    pending.group_id, next_group++).first;
+            }
+            clip->SetGroupId(group->second);
+        }
         clip->setSelected(true);
         last_added_clip = clip;
         if(same_editor && clip_duplicated_callback)
@@ -693,7 +746,7 @@ void LightTrackScene::drawBackground(QPainter* painter, const QRectF& rect)
 
     PaintRow(
         painter,
-        QRectF(0.0, 0.0, sceneRect().width(), ROW_HEIGHT),
+        QRectF(0.0, 0.0, sceneRect().width(), MUSIC_ROW_HEIGHT),
         music_row_color,
         TextLineColor(palette, 52, 82),
         TextLineColor(palette, 24, 42),
@@ -711,7 +764,7 @@ void LightTrackScene::drawBackground(QPainter* painter, const QRectF& rect)
             painter->drawText(
                 QRectF(
                     12.0,
-                    ROW_HEIGHT + 14.0,
+                    MUSIC_ROW_HEIGHT + 14.0,
                     sceneRect().width() - 24.0,
                     ROW_HEIGHT),
                 Qt::AlignLeft | Qt::AlignTop,
@@ -762,6 +815,145 @@ void LightTrackScene::keyPressEvent(QKeyEvent* event)
     QGraphicsScene::keyPressEvent(event);
 }
 
+quint64 LightTrackScene::NextGroupId() const
+{
+    quint64 highest = 0;
+    for(const TimelineClipItem* clip : clips)
+    {
+        highest = qMax(highest, clip->GroupId());
+    }
+    return highest + 1;
+}
+
+void LightTrackScene::SetGroupSelected(
+    const TimelineClipItem* clip,
+    bool selected)
+{
+    if(clip == nullptr)
+    {
+        return;
+    }
+    for(TimelineClipItem* candidate : clips)
+    {
+        if(candidate == clip
+            || (clip->GroupId() != 0
+                && candidate->GroupId() == clip->GroupId()))
+        {
+            candidate->setSelected(selected);
+        }
+    }
+}
+
+void LightTrackScene::ExpandSelectionToGroups()
+{
+    std::set<quint64> groups;
+    for(const TimelineClipItem* clip : clips)
+    {
+        if(clip->isSelected() && clip->GroupId() != 0)
+        {
+            groups.insert(clip->GroupId());
+        }
+    }
+    for(TimelineClipItem* clip : clips)
+    {
+        if(groups.count(clip->GroupId()) != 0)
+        {
+            clip->setSelected(true);
+        }
+    }
+}
+
+bool LightTrackScene::CanGroupSelection() const
+{
+    // At least two selected clips that are not already one group.
+    int selected = 0;
+    std::set<quint64> groups;
+    for(const TimelineClipItem* clip : clips)
+    {
+        if(clip->isSelected())
+        {
+            ++selected;
+            groups.insert(clip->GroupId());
+        }
+    }
+    return selected >= 2
+        && !(groups.size() == 1 && *groups.begin() != 0);
+}
+
+bool LightTrackScene::CanUngroupSelection() const
+{
+    for(const TimelineClipItem* clip : clips)
+    {
+        if(clip->isSelected() && clip->GroupId() != 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LightTrackScene::GroupSelectedClips()
+{
+    if(!CanGroupSelection())
+    {
+        return false;
+    }
+    CancelDrag();
+    const quint64 group = NextGroupId();
+    for(TimelineClipItem* clip : clips)
+    {
+        if(clip->isSelected())
+        {
+            clip->SetGroupId(group);
+        }
+    }
+    NotifyTimelineChanged();
+    return true;
+}
+
+bool LightTrackScene::UngroupSelectedClips()
+{
+    if(!CanUngroupSelection())
+    {
+        return false;
+    }
+    CancelDrag();
+    for(TimelineClipItem* clip : clips)
+    {
+        if(clip->isSelected())
+        {
+            clip->SetGroupId(0);
+        }
+    }
+    NotifyTimelineChanged();
+    return true;
+}
+
+void LightTrackScene::SetClipActivatedCallback(
+    TimelineEditor::ClipActivatedCallback callback)
+{
+    clip_activated_callback = std::move(callback);
+}
+
+void LightTrackScene::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event)
+{
+    if(event->button() == Qt::LeftButton)
+    {
+        if(TimelineClipItem* clip = ClipAt(event->scenePos()))
+        {
+            CancelDrag();
+            if(clip_activated_callback)
+            {
+                clip_activated_callback(clip->Id());
+            }
+            event->accept();
+            return;
+        }
+    }
+    // Elsewhere a double click behaves like a normal press.
+    mousePressEvent(event);
+}
+
 void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
 {
     if(event->button() == Qt::RightButton)
@@ -786,7 +978,7 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
     const bool is_music_row =
         music_duration_ms > 0
         && scene_pos.y() >= 0.0
-        && scene_pos.y() < ROW_HEIGHT;
+        && scene_pos.y() < MUSIC_ROW_HEIGHT;
     if(IsPlayheadHandle(scene_pos) || is_music_row)
     {
         clearSelection();
@@ -827,7 +1019,7 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
         // Defer deselection until release so Ctrl+drag can move the group too.
         pending_clip_click = clip->isSelected()
             ? DeselectClickedClip : KeepClipSelection;
-        clip->setSelected(true);
+        SetGroupSelected(clip, true);
     }
     else
     {
@@ -835,7 +1027,7 @@ void LightTrackScene::mousePressEvent(QGraphicsSceneMouseEvent* event)
         if(!clip->isSelected())
         {
             clearSelection();
-            clip->setSelected(true);
+            SetGroupSelected(clip, true);
         }
     }
 
@@ -933,6 +1125,8 @@ void LightTrackScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
     {
         UpdateBoxSelection(event->scenePos(), event->screenPos());
         CancelDrag();
+        // A box touching part of a group selects the whole group.
+        ExpandSelectionToGroups();
         event->accept();
         return;
     }
@@ -959,12 +1153,12 @@ void LightTrackScene::mouseReleaseEvent(QGraphicsSceneMouseEvent* event)
             if(pending_clip_click == SelectOnlyClickedClip)
             {
                 clearSelection();
-                active_clip->setSelected(true);
+                SetGroupSelected(active_clip, true);
                 NotifyClipSelected(active_clip);
             }
             else if(pending_clip_click == DeselectClickedClip)
             {
-                active_clip->setSelected(false);
+                SetGroupSelected(active_clip, false);
                 TimelineClipItem* selected_clip = nullptr;
                 for(TimelineClipItem* candidate : clips)
                 {
@@ -1097,7 +1291,8 @@ QVector<TimelineClip> LightTrackScene::BuildClipSnapshots(bool persistent) const
                 0,
                 persistent
                     ? qRound64(end_value)
-                    : static_cast<qint64>(std::ceil(end_value)))
+                    : static_cast<qint64>(std::ceil(end_value))),
+            clip->GroupId()
         });
     }
 
@@ -1148,7 +1343,7 @@ void LightTrackScene::RebuildLayout()
 
     const int lane_count = qMax(1, visible_lane_indices.size());
     const qreal content_height =
-        ROW_HEIGHT + lane_count * ROW_HEIGHT;
+        MUSIC_ROW_HEIGHT + lane_count * ROW_HEIGHT;
     const qreal minimum_content_width =
         minimum_content_duration_ms * pixels_per_second / 1000.0;
     qreal scene_width = qMax(
@@ -1181,7 +1376,7 @@ void LightTrackScene::RebuildLayout()
         const int lane_index = visible_lane_indices[visible_row];
         lanes[lane_index].rect = QRectF(
             0.0,
-            ROW_HEIGHT + visible_row * ROW_HEIGHT,
+            MUSIC_ROW_HEIGHT + visible_row * ROW_HEIGHT,
             scene_width,
             ROW_HEIGHT);
     }
@@ -1543,7 +1738,9 @@ void LightTrackScene::AddMusicItems()
         item->SetSpectrum(
             music_spectrum,
             music_width,
-            ROW_HEIGHT);
+            MUSIC_ROW_HEIGHT);
+        item->SetPeaks(music_peaks);
+        item->SetStyle(waveform_style);
         music_item = item;
     }
 
@@ -1558,7 +1755,7 @@ void LightTrackScene::AddMusicItems()
         playhead_item->setZValue(95.0);
         playhead_handle = Track(addEllipse(
             -PLAYHEAD_HANDLE_RADIUS,
-            ROW_HEIGHT / 2.0 - PLAYHEAD_HANDLE_RADIUS,
+            MUSIC_ROW_HEIGHT / 2.0 - PLAYHEAD_HANDLE_RADIUS,
             PLAYHEAD_HANDLE_RADIUS * 2.0,
             PLAYHEAD_HANDLE_RADIUS * 2.0,
             QPen(QColor(255, 255, 255, 235), 2.0),
@@ -1584,12 +1781,16 @@ void LightTrackScene::UpdatePlayhead()
         0.0,
         x,
         sceneRect().height());
+    if(music_item != nullptr)
+    {
+        music_item->SetPlayedWidth(x - music_item->pos().x());
+    }
 
     if(playhead_handle != nullptr)
     {
         playhead_handle->setRect(
             x - PLAYHEAD_HANDLE_RADIUS,
-            ROW_HEIGHT / 2.0 - PLAYHEAD_HANDLE_RADIUS,
+            MUSIC_ROW_HEIGHT / 2.0 - PLAYHEAD_HANDLE_RADIUS,
             PLAYHEAD_HANDLE_RADIUS * 2.0,
             PLAYHEAD_HANDLE_RADIUS * 2.0);
     }
@@ -1713,7 +1914,7 @@ void LightTrackScene::UpdateClipMove(const QPointF& pos, const QPoint& screen_po
     const int target_lane = LaneAt(pos);
     const int target_row = target_lane >= 0
         ? static_cast<int>(visible_lane_indices.indexOf(target_lane))
-        : (pos.y() < ROW_HEIGHT ? 0 : static_cast<int>(visible_lane_indices.size()) - 1);
+        : (pos.y() < MUSIC_ROW_HEIGHT ? 0 : static_cast<int>(visible_lane_indices.size()) - 1);
     const int active_start_row =
         static_cast<int>(visible_lane_indices.indexOf(clip_start_lane));
     const int row_delta = qBound(-first_row,
@@ -1961,59 +2162,147 @@ void LightTrackScene::CancelDrag(bool restore_positions)
     drag_mode = NoDrag;
 }
 
-TimelineRulerWidget::TimelineRulerWidget(QWidget* parent) :
-    QWidget(parent)
+namespace
 {
-    setFixedHeight(static_cast<int>(RULER_HEIGHT));
+constexpr ushort HIDE_ZERO_LED_ICON = 0xE0BB;  // eye-off
+constexpr ushort COLLAPSE_ALL_ICON = 0xE228;   // chevrons-down-up
+constexpr ushort EXPAND_ALL_ICON = 0xE211;     // chevrons-up-down
+constexpr ushort CHOOSE_DEVICES_ICON = 0xE460; // list-filter
 
-    hide_zero_led_zones_button = new QPushButton(
-        QString(QChar(0xE0BB)),
-        this);
-    hide_zero_led_zones_button->setObjectName(
-        QStringLiteral("hideZeroLedZonesButton"));
-    hide_zero_led_zones_button->setCheckable(true);
-    hide_zero_led_zones_button->setFocusPolicy(Qt::NoFocus);
-    hide_zero_led_zones_button->setToolTip(
-        QStringLiteral("Hide zones with zero LEDs"));
-    hide_zero_led_zones_button->setStyleSheet(R"(
-        QPushButton#hideZeroLedZonesButton {
+QPushButton* CreateDeviceHeaderButton(
+    QWidget* parent,
+    const QString& object_name,
+    ushort icon,
+    const QString& tool_tip)
+{
+    QPushButton* button =
+        new QPushButton(QString(QChar(icon)), parent);
+    button->setObjectName(object_name);
+    button->setFocusPolicy(Qt::NoFocus);
+    button->setToolTip(tool_tip);
+    button->setStyleSheet(QStringLiteral(R"(
+        QPushButton#%1 {
             background-color: transparent;
             border: 1px solid transparent;
             border-radius: 5px;
             padding: 0;
         }
 
-        QPushButton#hideZeroLedZonesButton:hover {
+        QPushButton#%1:hover {
             background-color: rgba(127, 127, 127, 45);
         }
 
-        QPushButton#hideZeroLedZonesButton:pressed {
+        QPushButton#%1:pressed {
             background-color: rgba(127, 127, 127, 80);
         }
 
-        QPushButton#hideZeroLedZonesButton:checked {
+        QPushButton#%1:checked {
             background-color: rgba(64, 188, 255, 70);
             border-color: rgba(64, 188, 255, 180);
         }
 
-        QPushButton#hideZeroLedZonesButton:checked:hover {
+        QPushButton#%1:checked:hover {
             background-color: rgba(64, 188, 255, 95);
         }
-    )");
+    )").arg(object_name));
     QFont icon_font(lighttrack::ui::LucideFontFamily());
     icon_font.setPixelSize(15);
-    hide_zero_led_zones_button->setFont(icon_font);
+    button->setFont(icon_font);
+    return button;
+}
+}
+
+TimelineRulerWidget::TimelineRulerWidget(QWidget* parent) :
+    QWidget(parent)
+{
+    setFixedHeight(static_cast<int>(RULER_HEIGHT));
+
+    choose_devices_button = CreateDeviceHeaderButton(
+        this,
+        QStringLiteral("chooseDevicesButton"),
+        CHOOSE_DEVICES_ICON,
+        QStringLiteral("Choose which devices to show"));
+    connect(
+        choose_devices_button,
+        &QPushButton::clicked,
+        this,
+        [this]()
+        {
+            if(choose_devices_requested_callback)
+            {
+                choose_devices_requested_callback();
+            }
+        });
+
+    expand_all_button = CreateDeviceHeaderButton(
+        this,
+        QStringLiteral("expandAllDevicesButton"),
+        COLLAPSE_ALL_ICON,
+        QString());
+    SetDevicesExpanded(true);
+    connect(
+        expand_all_button,
+        &QPushButton::clicked,
+        this,
+        [this]()
+        {
+            if(expand_all_requested_callback)
+            {
+                expand_all_requested_callback(!devices_expanded);
+            }
+        });
+
+    // Lane filters: a menu of checkable options; the button stays
+    // highlighted while any filter is on.
+    hide_zero_led_zones_button = CreateDeviceHeaderButton(
+        this,
+        QStringLiteral("hideZeroLedZonesButton"),
+        HIDE_ZERO_LED_ICON,
+        QStringLiteral("Hide zones"));
+    hide_zero_led_zones_button->setCheckable(true);
+    lane_filter_menu = new QMenu(hide_zero_led_zones_button);
+    hide_zero_led_action = lane_filter_menu->addAction(
+        QStringLiteral("Hide zones with zero LEDs"));
+    hide_zero_led_action->setCheckable(true);
+    hide_disabled_action = lane_filter_menu->addAction(
+        QStringLiteral("Hide disabled zones"));
+    hide_disabled_action->setCheckable(true);
 
     connect(
-        hide_zero_led_zones_button,
-        &QPushButton::toggled,
+        hide_zero_led_action,
+        &QAction::toggled,
         this,
         [this](bool checked)
         {
+            UpdateLaneFilterButton();
             if(hide_zero_led_zones_changed_callback)
             {
                 hide_zero_led_zones_changed_callback(checked);
             }
+        });
+    connect(
+        hide_disabled_action,
+        &QAction::toggled,
+        this,
+        [this](bool checked)
+        {
+            UpdateLaneFilterButton();
+            if(hide_disabled_lanes_changed_callback)
+            {
+                hide_disabled_lanes_changed_callback(checked);
+            }
+        });
+    connect(
+        hide_zero_led_zones_button,
+        &QPushButton::clicked,
+        this,
+        [this]()
+        {
+            // The highlight reflects the filters, not the click.
+            UpdateLaneFilterButton();
+            lane_filter_menu->popup(
+                hide_zero_led_zones_button->mapToGlobal(
+                    QPoint(0, hide_zero_led_zones_button->height())));
         });
     UpdateDeviceButtonGeometry();
 }
@@ -2069,6 +2358,56 @@ void TimelineRulerWidget::SetHideZeroLedZonesChangedCallback(
     hide_zero_led_zones_changed_callback = std::move(callback);
 }
 
+void TimelineRulerWidget::SetHideDisabledLanesChangedCallback(
+    std::function<void(bool)> callback)
+{
+    hide_disabled_lanes_changed_callback = std::move(callback);
+}
+
+void TimelineRulerWidget::UpdateLaneFilterButton()
+{
+    const bool any = hide_zero_led_action->isChecked()
+        || hide_disabled_action->isChecked();
+    hide_zero_led_zones_button->setChecked(any);
+    QStringList active;
+    if(hide_zero_led_action->isChecked())
+    {
+        active << QStringLiteral("zero-LED zones");
+    }
+    if(hide_disabled_action->isChecked())
+    {
+        active << QStringLiteral("disabled zones");
+    }
+    hide_zero_led_zones_button->setToolTip(
+        active.isEmpty()
+            ? QStringLiteral("Hide zones")
+            : QStringLiteral("Hiding: %1").arg(active.join(", ")));
+}
+
+void TimelineRulerWidget::SetChooseDevicesRequestedCallback(
+    std::function<void()> callback)
+{
+    choose_devices_requested_callback = std::move(callback);
+}
+
+void TimelineRulerWidget::SetExpandAllRequestedCallback(
+    std::function<void(bool)> callback)
+{
+    expand_all_requested_callback = std::move(callback);
+}
+
+void TimelineRulerWidget::SetDevicesExpanded(bool expanded)
+{
+    devices_expanded = expanded;
+    expand_all_button->setText(
+        QString(QChar(
+            expanded ? COLLAPSE_ALL_ICON : EXPAND_ALL_ICON)));
+    expand_all_button->setToolTip(
+        expanded
+            ? QStringLiteral("Collapse all devices")
+            : QStringLiteral("Expand all devices"));
+}
+
 void TimelineRulerWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
@@ -2077,22 +2416,42 @@ void TimelineRulerWidget::resizeEvent(QResizeEvent* event)
 
 void TimelineRulerWidget::UpdateDeviceButtonGeometry()
 {
-    if(hide_zero_led_zones_button == nullptr)
+    if(hide_zero_led_zones_button == nullptr
+        || expand_all_button == nullptr
+        || choose_devices_button == nullptr)
     {
         return;
     }
 
     constexpr int button_size = 24;
+    constexpr int button_spacing = 2;
     constexpr int right_margin = 5;
     const int visible_label_width = qRound(
         qMin<qreal>(label_width, width()));
+    const int top = (height() - button_size) / 2;
+    const int hide_x = qMax(
+        right_margin,
+        visible_label_width
+            - button_size
+            - right_margin);
     hide_zero_led_zones_button->setGeometry(
+        hide_x,
+        top,
+        button_size,
+        button_size);
+    const int expand_x = qMax(
+        right_margin,
+        hide_x - button_spacing - button_size);
+    expand_all_button->setGeometry(
+        expand_x,
+        top,
+        button_size,
+        button_size);
+    choose_devices_button->setGeometry(
         qMax(
             right_margin,
-            visible_label_width
-                - button_size
-                - right_margin),
-        (height() - button_size) / 2,
+            expand_x - button_spacing - button_size),
+        top,
         button_size,
         button_size);
 }
@@ -2133,7 +2492,7 @@ void TimelineRulerWidget::paintEvent(QPaintEvent*)
             0.0,
             qMax<qreal>(
                 0.0,
-                visible_label_width - 48.0),
+                visible_label_width - 100.0),
             height()),
         Qt::AlignVCenter | Qt::AlignLeft,
         QStringLiteral("Device"));
