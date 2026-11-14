@@ -21,6 +21,9 @@
 #include <QShortcut>
 #include <QSlider>
 
+#include <QElapsedTimer>
+#include <QThread>
+
 #include <cstdlib>
 #include <functional>
 #include <iostream>
@@ -54,6 +57,24 @@ void Require(bool condition, const char* message)
         std::cerr << message << std::endl;
         std::exit(EXIT_FAILURE);
     }
+}
+
+// Device colors are written by the plugin's per-device output threads, so
+// they reach the test controllers shortly after the UI change, not inside it.
+bool WaitFor(const std::function<bool()>& condition, int timeout_ms = 2000)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while(!condition())
+    {
+        if(timer.elapsed() > timeout_ms)
+        {
+            return false;
+        }
+        QApplication::processEvents();
+        QThread::msleep(2);
+    }
+    return true;
 }
 
 QPushButton* Button(QWidget* page, const QString& name)
@@ -237,18 +258,21 @@ int main(int argc, char** argv)
     zone_item->setText(0, "Desk zone");
     zone_item->child(1)->setText(0, "Desk segment");
     SetState(zone_item, 1);
-    Require(output.colors[0] == ToRGBColor(255, 255, 255), "Highlight did not light the zone");
+    Require(WaitFor([&]() { return output.colors[0] == ToRGBColor(255, 255, 255); }),
+        "Highlight did not light the zone");
     Button(page, "Undo")->click();
-    Require(State(tree->topLevelItem(1)->child(0)) == 0 && output.colors[0] == 0,
+    Require(State(tree->topLevelItem(1)->child(0)) == 0
+        && WaitFor([&]() { return output.colors[0] == 0; }),
         "Undo did not restore the highlight state and output");
     Button(page, "Redo")->click();
     zone_item = tree->topLevelItem(1)->child(0);
     Require(State(zone_item) == 1, "Redo did not restore the highlight state");
     SetState(zone_item->child(0), 2);
-    Require(output.colors[0] == 0, "Disable did not override the parent highlight");
+    Require(WaitFor([&]() { return output.colors[0] == 0; }),
+        "Disable did not override the parent highlight");
     Button(page, "Undo")->click();
     Require(State(tree->topLevelItem(1)->child(0)->child(0)) == 0
-        && output.colors[0] == ToRGBColor(255, 255, 255),
+        && WaitFor([&]() { return output.colors[0] == ToRGBColor(255, 255, 255); }),
         "Undo did not restore the disabled state and output");
     Button(page, "Redo")->click();
     zone_item = tree->topLevelItem(1)->child(0);
@@ -274,8 +298,12 @@ int main(int argc, char** argv)
             "Zone or segment name was not restored");
         Require(State(zone) == 1 && State(zone->child(0)) == 2 && State(zone->child(1)) == 1
             && State(tree->topLevelItem(1)) == 3, "Lane flags were not restored by device identity");
-        Require(output.colors[0] == 0 && output.colors[1] == ToRGBColor(255, 255, 255)
-            && other.colors[0] == 0, "Restored lane flags did not reach the output");
+        Require(WaitFor([&]()
+            {
+                return output.colors[0] == 0
+                    && output.colors[1] == ToRGBColor(255, 255, 255)
+                    && other.colors[0] == 0;
+            }), "Restored lane flags did not reach the output");
     };
     check_configured();
     Button(page, "Undo")->click();
@@ -297,7 +325,8 @@ int main(int argc, char** argv)
         && State(tree->topLevelItem(1)) == 0
         && State(tree->topLevelItem(2)->child(0)) == 0
         && State(tree->topLevelItem(2)->child(0)->child(0)) == 0
-        && output.colors[1] == 0, "Loading defaults did not clear the previous settings");
+        && WaitFor([&]() { return output.colors[1] == 0; }),
+        "Loading defaults did not clear the previous settings");
     FileAction(page, "Load layout", clips_path);
     check_configured();
     FileAction(page, "Save layout", roundtrip_path);
@@ -313,8 +342,11 @@ int main(int argc, char** argv)
             && State(tree->topLevelItem(2)->child(0)->child(0)) == 0
             && State(tree->topLevelItem(2)->child(0)->child(1)) == 0,
             "New must restore default lane names and flags");
-        Require(output.colors[0] == 0 && output.colors[1] == 0 && other.colors[0] == 0,
-            "New must clear highlighted output");
+        Require(WaitFor([&]()
+            {
+                return output.colors[0] == 0 && output.colors[1] == 0
+                    && other.colors[0] == 0;
+            }), "New must clear highlighted output");
         Require(!Button(page, "Undo")->isEnabled() && !Button(page, "Redo")->isEnabled(),
             "New must reset undo and redo history");
         Require(Button(page, "Save layout")->toolTip() == "Save layout (Ctrl+S)",
