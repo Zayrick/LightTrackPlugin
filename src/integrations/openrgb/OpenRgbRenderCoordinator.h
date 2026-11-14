@@ -13,4 +13,9 @@ std::mutex& ControllerFrameMutex();
 
 void SetCurrentRenderingEffect(RGBEffect* effect) noexcept;
 RGBEffect* CurrentRenderingEffect() noexcept;
+
+// True while this thread is submitting a LightTrack frame to a real output
+// controller (used by playback diagnostics to tell writers apart).
+void SetSubmittingOutput(bool submitting) noexcept;
+bool IsSubmittingOutput() noexcept;
 }

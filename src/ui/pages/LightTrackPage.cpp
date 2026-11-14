@@ -2,14 +2,19 @@
 
 #include "ui/UiHelpers.h"
 #include "ui/pages/LightTrackPagePrivate.h"
+#include "integrations/openrgb/PerformanceStats.h"
 #include "ui/timeline/TimelineEditor.h"
 
+#include <QAction>
+#include <QActionGroup>
+#include <QDialog>
 #include <QFont>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMenu>
 #include <QPushButton>
 #include <QShortcut>
 #include <QSizePolicy>
@@ -50,7 +55,8 @@ LightTrackPage::LightTrackPage(
     OpenRGBPluginAPIInterface* plugin_api,
     QWidget* parent) :
     QWidget(parent),
-    backend(plugin_api)
+    backend(plugin_api),
+    diagnostics(std::make_unique<openrgb::PlaybackDiagnostics>(plugin_api))
 {
     QVBoxLayout* page_layout = new QVBoxLayout(this);
     page_layout->setContentsMargins(
@@ -124,6 +130,12 @@ LightTrackPage::LightTrackPage(
     toolbar_new_button->setFocusPolicy(Qt::NoFocus);
     toolbar_save_button =
         ToolbarButton(0xE14D, toolbar_left_group);
+    toolbar_quick_save_button =
+        ToolbarButton(0xE710, toolbar_left_group);
+    toolbar_quick_save_button->setObjectName("toolbarQuickSaveButton");
+    toolbar_quick_save_button->setAccessibleName("Quick save");
+    toolbar_quick_save_button->setToolTip(
+        "Quick save\nNot saved yet: asks for a file the first time");
     toolbar_load_button =
         ToolbarButton(0xE318, toolbar_left_group);
     toolbar_undo_button->setToolTip("Undo (Ctrl+Z)");
@@ -153,6 +165,7 @@ LightTrackPage::LightTrackPage(
     toolbar_left_layout->addWidget(toolbar_snap_button);
     toolbar_left_layout->addWidget(toolbar_new_button);
     toolbar_left_layout->addWidget(toolbar_save_button);
+    toolbar_left_layout->addWidget(toolbar_quick_save_button);
     toolbar_left_layout->addWidget(toolbar_load_button);
 
     QWidget* toolbar_right_group = new QWidget(toolbar);
@@ -164,16 +177,59 @@ LightTrackPage::LightTrackPage(
     toolbar_right_layout->setContentsMargins(0, 0, 0, 0);
     toolbar_right_layout->setSpacing(6);
     toolbar_right_layout->addStretch();
-    QSlider* zoom_slider =
-        new QSlider(Qt::Horizontal, toolbar_right_group);
-    zoom_slider->setRange(
-        static_cast<int>(TIMELINE_ZOOM_MIN),
-        static_cast<int>(TIMELINE_ZOOM_MAX));
-    zoom_slider->setValue(static_cast<int>(GRID_WIDTH));
-    zoom_slider->setFixedWidth(96);
+    toolbar_waveform_button =
+        ToolbarButton(0xE55B, toolbar_right_group);
+    toolbar_waveform_button->setObjectName(
+        "toolbarWaveformButton");
+    toolbar_waveform_button->setToolTip("Waveform style");
+    toolbar_waveform_button->setAccessibleName("Waveform style");
+    waveform_menu = new QMenu(toolbar_waveform_button);
+    QActionGroup* waveform_group = new QActionGroup(waveform_menu);
+    waveform_group->setExclusive(true);
+    const std::pair<WaveformStyle, const char*> waveform_styles[] = {
+        {WaveformStyle::Studio, "Studio (DAW) waveform"},
+        {WaveformStyle::Smooth, "Smooth waveform"},
+        {WaveformStyle::Bars, "Thin rounded bars"},
+        {WaveformStyle::Line, "Line waveform"},
+        {WaveformStyle::Progress, "Played / unplayed bars"},
+        {WaveformStyle::Classic, "Classic blocks"}};
+    for(const auto& entry : waveform_styles)
+    {
+        QAction* action = waveform_menu->addAction(entry.second);
+        action->setCheckable(true);
+        action->setData(static_cast<int>(entry.first));
+        action->setChecked(entry.first == waveform_style);
+        waveform_group->addAction(action);
+        const WaveformStyle style = entry.first;
+        connect(
+            action,
+            &QAction::triggered,
+            this,
+            [this, style]()
+            {
+                SetWaveformStyle(style, true);
+            });
+    }
+    connect(
+        toolbar_waveform_button,
+        &QPushButton::clicked,
+        this,
+        [this]()
+        {
+            waveform_menu->popup(
+                toolbar_waveform_button->mapToGlobal(
+                    QPoint(0, toolbar_waveform_button->height())));
+        });
+    toolbar_right_layout->addWidget(toolbar_waveform_button);
+    // Zoom slider lives in the transport bar under the timeline.
+    QSlider* zoom_slider = new QSlider(Qt::Horizontal, this);
+    // Logarithmic: each step zooms by the same ratio across the wide range.
+    zoom_slider->setObjectName("timelineZoomSlider");
+    zoom_slider->setRange(0, ZOOM_SLIDER_STEPS);
+    zoom_slider->setValue(ZoomToSlider(GRID_WIDTH));
+    zoom_slider->setMinimumWidth(160);
     zoom_slider->setFocusPolicy(Qt::NoFocus);
     zoom_slider->setToolTip("Timeline zoom");
-    toolbar_right_layout->addWidget(zoom_slider);
     toolbar_music_button =
         new QPushButton("Select Music File", toolbar_right_group);
     toolbar_music_button->setObjectName(
@@ -188,7 +244,8 @@ LightTrackPage::LightTrackPage(
         0,
         0,
         Qt::AlignLeft | Qt::AlignVCenter);
-    QWidget* toolbar_playback_group = new QWidget(toolbar);
+    // Transport buttons live in the transport bar under the timeline.
+    QWidget* toolbar_playback_group = new QWidget(this);
     toolbar_playback_group->setSizePolicy(
         QSizePolicy::Fixed,
         QSizePolicy::Preferred);
@@ -215,11 +272,67 @@ LightTrackPage::LightTrackPage(
     toolbar_playback_layout->addWidget(toolbar_play_button);
     toolbar_playback_layout->addWidget(toolbar_pause_button);
     toolbar_playback_layout->addWidget(toolbar_stop_button);
-    toolbar_layout->addWidget(
-        toolbar_playback_group,
-        0,
-        1,
-        Qt::AlignCenter);
+
+    // Follow playhead: when off, the timeline does not scroll during playback.
+    QPushButton* follow_button =
+        ToolbarButton(0xE1DA, toolbar_playback_group);
+    follow_button->setObjectName("followPlayheadButton");
+    follow_button->setAccessibleName("Follow playhead");
+    follow_button->setCheckable(true);
+    follow_button->setChecked(true);
+    follow_button->setToolTip(
+        "Follow playhead: scroll the timeline during playback");
+    connect(
+        follow_button,
+        &QPushButton::toggled,
+        this,
+        [this, follow_button](bool follow)
+        {
+            timeline_editor->SetFollowPlayhead(follow);
+            follow_button->setToolTip(
+                follow
+                    ? "Follow playhead: scroll the timeline during playback"
+                    : "Not following the playhead (click to follow)");
+        });
+    toolbar_playback_layout->addWidget(follow_button);
+
+    // Slow play: playback speed menu.
+    toolbar_speed_button =
+        new QPushButton("1x", this);
+    toolbar_speed_button->setObjectName("toolbarSpeedButton");
+    toolbar_speed_button->setAccessibleName("Playback speed");
+    toolbar_speed_button->setToolTip(
+        "Playback speed (slower also lowers the pitch)");
+    toolbar_speed_button->setFixedSize(
+        44,
+        static_cast<int>(TOOLBAR_BUTTON_SIZE));
+    toolbar_speed_button->setFocusPolicy(Qt::NoFocus);
+    speed_menu = new QMenu(toolbar_speed_button);
+    QActionGroup* speed_group = new QActionGroup(speed_menu);
+    speed_group->setExclusive(true);
+    for(const double rate : {0.25, 0.5, 0.75, 1.0})
+    {
+        QAction* action = speed_menu->addAction(
+            QString("%1x").arg(rate));
+        action->setCheckable(true);
+        action->setChecked(rate == 1.0);
+        action->setData(rate);
+        speed_group->addAction(action);
+        connect(
+            action,
+            &QAction::triggered,
+            this,
+            [this, rate]() { SetPlaybackRate(rate); });
+    }
+    connect(
+        toolbar_speed_button,
+        &QPushButton::clicked,
+        this,
+        [this]()
+        {
+            speed_menu->popup(toolbar_speed_button->mapToGlobal(
+                QPoint(0, toolbar_speed_button->height())));
+        });
     toolbar_layout->addWidget(
         toolbar_right_group,
         0,
@@ -242,13 +355,39 @@ LightTrackPage::LightTrackPage(
 
     timeline_editor = new TimelineEditor(this);
     timeline_editor->SetEffects(backend.Effects());
-    settings_stack = new QStackedWidget(this);
+
+    // Effect settings live in their own window, opened by double-clicking
+    // a clip on the timeline.
+    settings_window = new QDialog(this);
+    settings_window->setObjectName("effectSettingsWindow");
+    settings_window->setWindowTitle("Effect Settings");
+    settings_window->setWindowFlags(
+        Qt::Tool
+        | Qt::WindowTitleHint
+        | Qt::WindowCloseButtonHint);
+    settings_window->setModal(false);
+    settings_window->resize(
+        static_cast<int>(SETTINGS_PANEL_PREFERRED_WIDTH),
+        640);
+    QVBoxLayout* settings_window_layout =
+        new QVBoxLayout(settings_window);
+    settings_window_layout->setContentsMargins(0, 0, 0, 0);
+    settings_stack = new QStackedWidget(settings_window);
+    settings_window_layout->addWidget(settings_stack);
     music_timer = new QTimer(this);
     music_timer->setInterval(33);
     music_timer->setTimerType(Qt::PreciseTimer);
     runtime_boundary_timer = new QTimer(this);
     runtime_boundary_timer->setSingleShot(true);
     runtime_boundary_timer->setTimerType(Qt::PreciseTimer);
+    scrub_stop_timer = new QTimer(this);
+    scrub_stop_timer->setSingleShot(true);
+    scrub_stop_timer->setInterval(250);
+    connect(
+        scrub_stop_timer,
+        &QTimer::timeout,
+        this,
+        [this]() { scrubber.Stop(); });
     history_commit_timer = new QTimer(this);
     history_commit_timer->setSingleShot(true);
     history_commit_timer->setInterval(250);
@@ -266,10 +405,21 @@ LightTrackPage::LightTrackPage(
     settings_placeholder->setMargin(24);
     settings_stack->addWidget(settings_placeholder);
 
+    timeline_editor->SetClipActivatedCallback(
+        [this](ClipId clip_id)
+        {
+            OpenClipSettingsWindow(clip_id);
+        });
     timeline_editor->SetClipSelectedCallback(
         [this](std::optional<ClipId> clip_id)
         {
-            ShowClipSettings(clip_id);
+            // Only an open settings window follows the selection; a single
+            // click never opens it.
+            if(!settings_window->isVisible() || !clip_id.has_value())
+            {
+                return;
+            }
+            OpenClipSettingsWindow(*clip_id);
         });
     timeline_editor->SetClipRemovedCallback(
         [this](ClipId clip_id)
@@ -286,9 +436,9 @@ LightTrackPage::LightTrackPage(
     timeline_editor->SetTimelineChangedCallback([this]()
     {
         UpdateMinimumTimelineDuration();
-        if(music_playing)
+        if(output_active)
         {
-            SyncRuntime(MusicPositionMs());
+            StartRuntime(MusicPositionMs());
         }
         CommitHistorySnapshot();
     });
@@ -314,6 +464,11 @@ LightTrackPage::LightTrackPage(
             CommitHistorySnapshot();
             return true;
         });
+    timeline_editor->SetChooseDevicesCallback(
+        [this]()
+        {
+            ChooseDevices();
+        });
     timeline_editor->SetLaneDisabledCallback(
         [this](int lane_index, bool disabled)
         {
@@ -327,46 +482,88 @@ LightTrackPage::LightTrackPage(
             return true;
         });
 
-    QWidget* right_column = new QWidget(this);
-    QVBoxLayout* right_layout =
-        new QVBoxLayout(right_column);
-    right_layout->setContentsMargins(0, 0, 0, 0);
-    right_layout->setSpacing(0);
-    QLabel* settings_header =
-        HeaderLabel("Effect Settings", right_column);
-    settings_header->setFixedHeight(
-        static_cast<int>(RULER_HEIGHT));
-    right_layout->addWidget(settings_header);
-    right_layout->addWidget(settings_stack);
-    right_column->setMinimumWidth(
-        static_cast<int>(SETTINGS_PANEL_MIN_WIDTH));
-    right_column->setSizePolicy(
-        QSizePolicy::Preferred,
-        QSizePolicy::Expanding);
-
-    QSplitter* content_splitter =
-        new QSplitter(Qt::Horizontal, content);
-    content_splitter->setChildrenCollapsible(false);
-    content_splitter->setHandleWidth(static_cast<int>(GAP));
-    content_splitter->addWidget(timeline_editor);
-    content_splitter->addWidget(right_column);
-    content_splitter->setStretchFactor(0, 1);
-    content_splitter->setStretchFactor(1, 0);
-    content_splitter->setSizes({
-        static_cast<int>(
-            TIMELINE_MIN_WIDTH
-            + LABEL_WIDTH
-            + EFFECTS_PANEL_WIDTH
-            + GAP),
-        static_cast<int>(SETTINGS_PANEL_PREFERRED_WIDTH)
-    });
-
-    content_layout->addWidget(content_splitter, 1);
+    content_layout->addWidget(timeline_editor, 1);
     page_layout->addWidget(toolbar);
     page_layout->addSpacing(
         static_cast<int>(TOOLBAR_SEPARATOR_GAP));
     page_layout->addWidget(toolbar_separator);
     page_layout->addWidget(content, 1);
+
+    // Transport bar under the timeline (VEGAS-style): rate, transport
+    // buttons, a long zoom slider and the playhead time.
+    QWidget* transport_bar = new QWidget(this);
+    transport_bar->setObjectName("lightTrackTransportBar");
+    transport_bar->setFixedHeight(
+        static_cast<int>(TOOLBAR_HEIGHT) + 6);
+    transport_bar->setStyleSheet(R"(
+        QWidget#lightTrackTransportBar QPushButton {
+            background-color: transparent;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            padding: 0;
+        }
+
+        QWidget#lightTrackTransportBar QPushButton:hover {
+            background-color: rgba(127, 127, 127, 45);
+        }
+
+        QWidget#lightTrackTransportBar QPushButton:pressed {
+            background-color: rgba(127, 127, 127, 80);
+        }
+
+        QWidget#lightTrackTransportBar QPushButton:checked {
+            background-color: rgba(64, 188, 255, 70);
+            border-color: rgba(64, 188, 255, 180);
+        }
+
+        QWidget#lightTrackTransportBar QPushButton:checked:hover {
+            background-color: rgba(64, 188, 255, 95);
+        }
+
+        QWidget#lightTrackTransportBar QLabel#transportTimeLabel {
+            font-family: Consolas, monospace;
+            font-size: 14px;
+            padding: 0 6px;
+        }
+    )");
+    QHBoxLayout* transport_layout = new QHBoxLayout(transport_bar);
+    transport_layout->setContentsMargins(0, 6, 0, 0);
+    transport_layout->setSpacing(
+        static_cast<int>(TOOLBAR_BUTTON_SPACING));
+
+    QLabel* rate_label = new QLabel("Rate:", transport_bar);
+    toolbar_speed_button->setParent(transport_bar);
+    transport_layout->addWidget(rate_label);
+    transport_layout->addWidget(toolbar_speed_button);
+    transport_layout->addSpacing(12);
+
+    toolbar_playback_group->setParent(transport_bar);
+    transport_layout->addWidget(toolbar_playback_group);
+    transport_layout->addSpacing(16);
+
+    QPushButton* zoom_out_button = ToolbarButton(0xE1B7, transport_bar);
+    zoom_out_button->setToolTip("Zoom out");
+    zoom_out_button->setAccessibleName("Zoom out");
+    QPushButton* zoom_in_button = ToolbarButton(0xE1B6, transport_bar);
+    zoom_in_button->setToolTip("Zoom in");
+    zoom_in_button->setAccessibleName("Zoom in");
+    zoom_slider->setParent(transport_bar);
+    transport_layout->addWidget(zoom_out_button);
+    transport_layout->addWidget(zoom_slider, 1);
+    transport_layout->addWidget(zoom_in_button);
+    connect(zoom_out_button, &QPushButton::clicked, zoom_slider,
+        [zoom_slider]() { zoom_slider->setValue(zoom_slider->value() - 50); });
+    connect(zoom_in_button, &QPushButton::clicked, zoom_slider,
+        [zoom_slider]() { zoom_slider->setValue(zoom_slider->value() + 50); });
+
+    transport_layout->addSpacing(12);
+    transport_time_label = new QLabel(transport_bar);
+    transport_time_label->setObjectName("transportTimeLabel");
+    transport_time_label->setToolTip("Playhead position");
+    transport_layout->addWidget(transport_time_label);
+    UpdateTimeDisplay(0);
+
+    page_layout->addWidget(transport_bar);
 
     connect(
         toolbar_music_button,
@@ -393,6 +590,11 @@ LightTrackPage::LightTrackPage(
         &QPushButton::clicked,
         this,
         [this]() { SaveLayout(); });
+    connect(
+        toolbar_quick_save_button,
+        &QPushButton::clicked,
+        this,
+        [this]() { QuickSaveLayout(); });
     connect(
         toolbar_load_button,
         &QPushButton::clicked,
@@ -427,13 +629,20 @@ LightTrackPage::LightTrackPage(
         this,
         [this](int value)
         {
-            timeline_editor->SetHorizontalZoom(value);
+            timeline_editor->SetHorizontalZoom(
+                qRound(SliderToZoom(value)));
         });
     connect(
         music_timer,
         &QTimer::timeout,
         this,
-        [this]() { UpdateMusicPosition(); });
+        [this]()
+        {
+            namespace perf = openrgb::performance;
+            const perf::Clock::time_point start = perf::Clock::now();
+            UpdateMusicPosition();
+            perf::RecordUi("playback tick", perf::MsSince(start));
+        });
     connect(
         runtime_boundary_timer,
         &QTimer::timeout,

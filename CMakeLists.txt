@@ -53,6 +53,8 @@ add_library(LightTrackPlugin SHARED
   src/integrations/audio/AudioWaveformAnalyzer.cpp
   src/integrations/audio/MiniaudioAudioService.h
   src/integrations/audio/MiniaudioAudioService.cpp
+  src/integrations/audio/AudioScrubber.h
+  src/integrations/audio/AudioScrubber.cpp
   "${MINIAUDIO_DIR}/miniaudio.c"
   src/infrastructure/persistence/LayoutFileRepository.h
   src/infrastructure/persistence/LayoutFileRepository.cpp
@@ -70,6 +72,18 @@ add_library(LightTrackPlugin SHARED
   src/integrations/openrgb/OpenRgbColorRouter.cpp
   src/integrations/openrgb/OpenRgbTimelineBackend.h
   src/integrations/openrgb/OpenRgbTimelineBackend.cpp
+  src/integrations/openrgb/ExternalEffectsSuspender.h
+  src/integrations/openrgb/ExternalEffectsSuspender.cpp
+  src/integrations/openrgb/PlaybackDiagnostics.h
+  src/integrations/openrgb/PlaybackDiagnostics.cpp
+  src/integrations/openrgb/PerformanceStats.h
+  src/integrations/openrgb/PerformanceStats.cpp
+  src/integrations/openrgb/OutputWriter.h
+  src/integrations/openrgb/OutputWriter.cpp
+  src/integrations/openrgb/LayerBufferController.h
+  src/integrations/openrgb/LayerBufferControllerDefaults.inc
+  src/integrations/openrgb/effects/ClipTimedEffect.h
+  src/integrations/openrgb/effects/LightTrackEffects.cpp
 )
 
 target_include_directories(LightTrackPlugin PRIVATE

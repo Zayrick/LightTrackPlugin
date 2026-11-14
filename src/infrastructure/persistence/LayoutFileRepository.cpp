@@ -23,6 +23,45 @@ using lighttrack::LayoutLaneSnapshot;
 using lighttrack::LayoutSnapshot;
 
 constexpr int LIGHTTRACK_LAYOUT_VERSION = 1;
+
+struct WaveformStyleName
+{
+    lighttrack::WaveformStyle style;
+    const char* name;
+};
+
+constexpr WaveformStyleName WAVEFORM_STYLE_NAMES[] = {
+    {lighttrack::WaveformStyle::Smooth, "smooth"},
+    {lighttrack::WaveformStyle::Bars, "bars"},
+    {lighttrack::WaveformStyle::Line, "line"},
+    {lighttrack::WaveformStyle::Progress, "progress"},
+    {lighttrack::WaveformStyle::Classic, "classic"},
+    {lighttrack::WaveformStyle::Studio, "studio"}};
+
+const char* WaveformStyleToName(lighttrack::WaveformStyle style)
+{
+    for(const WaveformStyleName& entry : WAVEFORM_STYLE_NAMES)
+    {
+        if(entry.style == style)
+        {
+            return entry.name;
+        }
+    }
+    return "studio";
+}
+
+// Unknown names (e.g. from a newer version) fall back to the default.
+lighttrack::WaveformStyle WaveformStyleFromName(const std::string& name)
+{
+    for(const WaveformStyleName& entry : WAVEFORM_STYLE_NAMES)
+    {
+        if(name == entry.name)
+        {
+            return entry.style;
+        }
+    }
+    return lighttrack::WaveformStyle::Studio;
+}
 constexpr const char* LIGHTTRACK_LAYOUT_FORMAT =
     "OpenRGB LightTrack Layout";
 
@@ -159,6 +198,17 @@ LayoutSnapshot DecodeLayout(
                 0,
                 music["durationMs"].get<qint64>());
         }
+        // Optional: older files use the default style.
+        if(music.contains("waveformStyle"))
+        {
+            if(!music["waveformStyle"].is_string())
+            {
+                throw std::runtime_error(
+                    "Invalid waveform style");
+            }
+            snapshot.music.waveform_style = WaveformStyleFromName(
+                music["waveformStyle"].get<std::string>());
+        }
     }
 
     if(!snapshot.music.path.isEmpty()
@@ -195,11 +245,19 @@ LayoutSnapshot DecodeLayout(
                     QString("Lane settings %1 are invalid").arg(lane_number)));
             }
 
+            // "hidden" is optional for files saved before it existed.
+            if(entry.contains("hidden") && !entry["hidden"].is_boolean())
+            {
+                throw std::runtime_error(ToUtf8(
+                    QString("Lane settings %1 are invalid").arg(lane_number)));
+            }
+
             snapshot.lanes.push_back({
                 SerializeOpaqueJson(entry["lane"]),
                 FromUtf8(entry["name"].get<std::string>()),
                 entry["highlighted"].get<bool>(),
-                entry["disabled"].get<bool>()
+                entry["disabled"].get<bool>(),
+                entry.value("hidden", false)
             });
         }
     }
@@ -236,13 +294,28 @@ LayoutSnapshot DecodeLayout(
                         .arg(clip_number)));
         }
 
+        // "group" is optional (files saved before grouping existed).
+        quint64 group_id = 0;
+        if(clip.contains("group"))
+        {
+            if(!clip["group"].is_number_unsigned())
+            {
+                throw std::runtime_error(
+                    ToUtf8(
+                        QString("Timeline clip %1 has an invalid group")
+                            .arg(clip_number)));
+            }
+            group_id = clip["group"].get<quint64>();
+        }
+
         snapshot.clips.push_back({
             ParseClipId(clip, clip_number, used_ids),
             FromUtf8(clip["effectId"].get<std::string>()),
             SerializeOpaqueJson(clip["lane"]),
             clip["startMs"].get<qint64>(),
             clip["endMs"].get<qint64>(),
-            SerializeOpaqueJson(clip["settings"])
+            SerializeOpaqueJson(clip["settings"]),
+            group_id
         });
     }
 
@@ -256,7 +329,9 @@ json EncodeLayout(const LayoutSnapshot& snapshot)
     layout["version"] = LIGHTTRACK_LAYOUT_VERSION;
     layout["music"] = {
         {"path", ToUtf8(snapshot.music.path)},
-        {"durationMs", snapshot.music.duration_ms}
+        {"durationMs", snapshot.music.duration_ms},
+        {"waveformStyle",
+            WaveformStyleToName(snapshot.music.waveform_style)}
     };
     layout["clips"] = json::array();
     layout["lanes"] = json::array();
@@ -274,7 +349,8 @@ json EncodeLayout(const LayoutSnapshot& snapshot)
             {"lane", lane},
             {"name", ToUtf8(entry.name)},
             {"highlighted", entry.highlighted},
-            {"disabled", entry.disabled}
+            {"disabled", entry.disabled},
+            {"hidden", entry.hidden}
         });
     }
 
@@ -325,6 +401,10 @@ json EncodeLayout(const LayoutSnapshot& snapshot)
         serialized_clip["startMs"] = clip.start_ms;
         serialized_clip["endMs"] = clip.end_ms;
         serialized_clip["settings"] = settings;
+        if(clip.group_id != 0)
+        {
+            serialized_clip["group"] = clip.group_id;
+        }
         layout["clips"].push_back(std::move(serialized_clip));
     }
 

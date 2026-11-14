@@ -3,6 +3,9 @@
 #include "integrations/openrgb/OpenRgbEffectCatalog.h"
 #include "integrations/openrgb/OpenRgbEffectFactory.h"
 #include "integrations/openrgb/OpenRgbColorRouter.h"
+#include "integrations/openrgb/effects/ClipTimedEffect.h"
+#include "integrations/openrgb/PlaybackDiagnostics.h"
+#include "integrations/openrgb/PerformanceStats.h"
 
 #include "ColorUtils.h"
 #include "ControllerZone.h"
@@ -11,8 +14,13 @@
 #include "RGBControllerInterface.h"
 #include "OpenRGBPluginInterface.h"
 
+#include <QCheckBox>
+#include <QComboBox>
 #include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QPointer>
+#include <QVBoxLayout>
 #include <QScrollArea>
 #include <QSizePolicy>
 
@@ -27,6 +35,10 @@
 namespace
 {
 using json = nlohmann::json;
+using lighttrack::openrgb::LayerOrientation;
+
+// Clip direction, stored next to the effect's own settings.
+constexpr const char* ORIENTATION_KEY = "LightTrackOrientation";
 using lighttrack::ClipId;
 using lighttrack::EffectDescriptor;
 using lighttrack::openrgb::OpenRgbTimelineBackend;
@@ -89,7 +101,10 @@ private:
 struct LaneEntry
 {
     QString name;
+    // Name shown by OpenRGB (honors names the user set in OpenRGB).
     QString native_name;
+    // Driver-reported name; older layouts saved this as the lane name.
+    QString raw_name;
     int level = 0;
     RGBControllerInterface* controller = nullptr;
     int zone_index = -1;
@@ -97,6 +112,7 @@ struct LaneEntry
     QString state_key;
     bool highlighted = false;
     bool disabled = false;
+    bool hidden = false;
     int led_count = 0;
 };
 
@@ -105,6 +121,7 @@ struct LaneState
     QString name;
     bool highlighted = false;
     bool disabled = false;
+    bool hidden = false;
 };
 
 struct RuntimeTarget
@@ -127,6 +144,18 @@ OpenRgbTimelineBackend::Effect::~Effect() = default;
 RGBEffect* OpenRgbTimelineBackend::Effect::Get() const noexcept
 {
     return value_.get();
+}
+
+LayerOrientation
+OpenRgbTimelineBackend::Effect::Orientation() const noexcept
+{
+    return orientation_;
+}
+
+void OpenRgbTimelineBackend::Effect::SetOrientation(
+    LayerOrientation orientation) noexcept
+{
+    orientation_ = orientation;
 }
 
 class OpenRgbTimelineBackend::Impl
@@ -191,6 +220,7 @@ public:
             }
 
             AddLane(
+                QString::fromStdString(controller->GetDisplayName()),
                 QString::fromStdString(controller->GetName()),
                 0,
                 controller,
@@ -204,6 +234,8 @@ public:
             {
                 const zone zone_ref = controller->GetZone(zone_index);
                 const int zone_lane = AddLane(
+                    QString::fromStdString(
+                        controller->GetZoneDisplayName(zone_index)),
                     QString::fromStdString(zone_ref.name),
                     1,
                     controller,
@@ -229,6 +261,7 @@ public:
                     const segment& segment_ref =
                         zone_ref.segments[segment_index];
                     const int segment_lane = AddLane(
+                        QString::fromStdString(segment_ref.name),
                         QString::fromStdString(segment_ref.name),
                         2,
                         controller,
@@ -269,7 +302,8 @@ public:
                 lane.level,
                 lane.highlighted,
                 lane.disabled,
-                lane.led_count
+                lane.led_count,
+                lane.hidden
             });
         }
         return snapshot;
@@ -286,7 +320,8 @@ public:
                 SerializeLane(index),
                 lane.name,
                 lane.highlighted,
-                lane.disabled
+                lane.disabled,
+                lane.hidden
             });
         }
         return states;
@@ -300,6 +335,7 @@ public:
             lane.name = lane.native_name;
             lane.highlighted = false;
             lane.disabled = false;
+            lane.hidden = false;
         }
         RefreshOverrideOutput();
         return CurrentDeviceSnapshot();
@@ -332,13 +368,19 @@ public:
             }
             const LayoutLaneSnapshot& state = states[index];
             LaneEntry& lane = lanes_[resolved_lanes[index]];
-            lane.name = state.name;
+            const QString name_override =
+                LaneNameOverride(lane, state.name);
+            lane.name = name_override.isEmpty()
+                ? lane.native_name
+                : name_override;
             lane.highlighted = state.highlighted;
             lane.disabled = state.disabled;
+            lane.hidden = state.hidden;
             lane_states_[lane.state_key] = {
-                state.name,
+                name_override,
                 state.highlighted,
-                state.disabled
+                state.disabled,
+                state.hidden
             };
         }
         RefreshOverrideOutput();
@@ -357,7 +399,8 @@ public:
 
         LaneEntry& lane = lanes_[lane_index];
         lane.name = trimmed_name;
-        lane_states_[lane.state_key].name = trimmed_name;
+        lane_states_[lane.state_key].name =
+            LaneNameOverride(lane, trimmed_name);
         return true;
     }
 
@@ -372,6 +415,20 @@ public:
         lane.highlighted = highlighted;
         lane_states_[lane.state_key].highlighted = highlighted;
         RefreshOverrideOutput();
+        return true;
+    }
+
+    // View-only: hides the lane in the timeline; output is unchanged.
+    bool SetLaneHidden(int lane_index, bool hidden)
+    {
+        if(lane_index < 0 || lane_index >= lanes_.size())
+        {
+            return false;
+        }
+
+        LaneEntry& lane = lanes_[lane_index];
+        lane.hidden = hidden;
+        lane_states_[lane.state_key].hidden = hidden;
         return true;
     }
 
@@ -466,8 +523,16 @@ public:
             throw std::runtime_error("Invalid effect instance");
         }
 
-        return QByteArray::fromStdString(
-            effect.Get()->ToJson().dump());
+        json settings = effect.Get()->ToJson();
+        const LayerOrientation orientation = effect.Orientation();
+        if(!orientation.IsIdentity())
+        {
+            settings[ORIENTATION_KEY] = {
+                {"rotation", orientation.rotation},
+                {"mirror", orientation.mirror}
+            };
+        }
+        return QByteArray::fromStdString(settings.dump());
     }
 
     bool ImportEffectSettings(
@@ -487,6 +552,20 @@ public:
                 settings.constData(),
                 settings.constData() + settings.size());
             effect_factory_.ApplySettings(*effect.Get(), parsed);
+
+            LayerOrientation orientation;
+            if(parsed.contains(ORIENTATION_KEY)
+                && parsed[ORIENTATION_KEY].is_object())
+            {
+                const json& value = parsed[ORIENTATION_KEY];
+                const int rotation = value.value("rotation", 0);
+                orientation.rotation =
+                    rotation == 90 || rotation == 180 || rotation == 270
+                    ? rotation
+                    : 0;
+                orientation.mirror = value.value("mirror", false);
+            }
+            effect.SetOrientation(orientation);
             return true;
         }
         catch(const std::exception& exception)
@@ -616,7 +695,73 @@ public:
             QSizePolicy::Ignored,
             QSizePolicy::Expanding);
         effect->show();
-        return page;
+
+        // Direction row above the effect's own settings.
+        QWidget* container = new QWidget(parent);
+        container->setMinimumWidth(0);
+        container->setSizePolicy(
+            QSizePolicy::Ignored,
+            QSizePolicy::Expanding);
+        QVBoxLayout* layout = new QVBoxLayout(container);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+
+        QWidget* direction_row = new QWidget(container);
+        QHBoxLayout* direction_layout = new QHBoxLayout(direction_row);
+        direction_layout->setContentsMargins(9, 9, 9, 3);
+        QLabel* direction_label =
+            new QLabel(QStringLiteral("Direction:"), direction_row);
+        QComboBox* rotation_box = new QComboBox(direction_row);
+        rotation_box->setObjectName(QStringLiteral("lightTrackRotation"));
+        const QChar degree_sign(0x00B0);
+        rotation_box->setToolTip(
+            QStringLiteral("Rotate the effect on 2D zones (clockwise).\n"
+                           "On strips, 180%1 reverses the direction.")
+                .arg(degree_sign));
+        for(const int degrees : {0, 90, 180, 270})
+        {
+            rotation_box->addItem(
+                QString::number(degrees) + degree_sign,
+                degrees);
+        }
+        QCheckBox* mirror_box =
+            new QCheckBox(QStringLiteral("Mirror"), direction_row);
+        mirror_box->setObjectName(QStringLiteral("lightTrackMirror"));
+        mirror_box->setToolTip(QStringLiteral(
+            "Flip the effect left/right. On strips, reverses the direction."));
+
+        const LayerOrientation current = found->second->Orientation();
+        rotation_box->setCurrentIndex(
+            rotation_box->findData(current.rotation));
+        mirror_box->setChecked(current.mirror);
+
+        const auto apply = [this, clip_id, rotation_box, mirror_box]()
+        {
+            LayerOrientation orientation;
+            orientation.rotation = rotation_box->currentData().toInt();
+            orientation.mirror = mirror_box->isChecked();
+            SetClipOrientation(clip_id, orientation);
+        };
+        QObject::connect(
+            rotation_box,
+            qOverload<int>(&QComboBox::currentIndexChanged),
+            container,
+            [apply](int) { apply(); });
+        QObject::connect(
+            mirror_box,
+            &QCheckBox::toggled,
+            container,
+            [apply](bool) { apply(); });
+
+        direction_layout->addWidget(direction_label);
+        direction_layout->addWidget(rotation_box);
+        direction_layout->addWidget(mirror_box);
+        direction_layout->addStretch(1);
+
+        layout->addWidget(direction_row);
+        page->setParent(container);
+        layout->addWidget(page, 1);
+        return container;
     }
 
     void RemoveClip(ClipId clip_id)
@@ -647,18 +792,20 @@ public:
 
     void StartRuntime(
         qint64 position_ms,
-        const QVector<TimelineClip>& clips)
+        const QVector<TimelineClip>& clips,
+        bool paused,
+        double rate)
     {
         if(runtime_running_)
         {
-            SyncRuntime(position_ms, clips);
+            SyncRuntime(position_ms, clips, paused, rate);
             return;
         }
 
         ConfigureRoutes(clips);
         runtime_running_ = true;
         color_router_.StartOutput();
-        SyncRuntime(position_ms, clips);
+        SyncRuntime(position_ms, clips, paused, rate);
     }
 
     void StopRuntime()
@@ -682,12 +829,17 @@ public:
 
     void SyncRuntime(
         qint64 position_ms,
-        const QVector<TimelineClip>& clips)
+        const QVector<TimelineClip>& clips,
+        bool paused,
+        double rate)
     {
         if(!runtime_running_)
         {
             return;
         }
+        last_position_ms_ = position_ms;
+        last_paused_ = paused;
+        last_rate_ = rate;
 
         if(!RoutesMatch(clips))
         {
@@ -713,35 +865,32 @@ public:
             active_clips[clip.id] = &clip;
         }
 
-        for(auto assignment = runtime_assignments_.begin();
-            assignment != runtime_assignments_.end();)
-        {
-            if(active_clips.find(assignment->first)
-                == active_clips.end())
-            {
-                color_router_.SetLayerActive(
-                    assignment->first,
-                    false);
-                const auto effect =
-                    clip_effects_.find(assignment->first);
-                if(effect != clip_effects_.end())
-                {
-                    DeactivateEffect(effect->second.get());
-                }
-                assignment = runtime_assignments_.erase(assignment);
-            }
-            else
-            {
-                ++assignment;
-            }
-        }
-
+        // Start new clips before ending old ones: a zone handed from one
+        // clip to the next then keeps the old frame until the new effect
+        // draws, instead of going black in between.
+        namespace perf = lighttrack::openrgb::performance;
+        const perf::Clock::time_point starts_begin = perf::Clock::now();
+        bool any_started = false;
         EffectManager* manager = EffectManager::Get();
         for(const auto& active : active_clips)
         {
             if(runtime_assignments_.find(active.first)
                 != runtime_assignments_.end())
             {
+                const auto running = clip_effects_.find(active.first);
+                if(running != clip_effects_.end())
+                {
+                    if(auto* timed = dynamic_cast<ClipTimedEffect*>(
+                           running->second->Get()))
+                    {
+                        timed->SyncClipTiming(
+                            position_ms - active.second->start_ms,
+                            active.second->end_ms
+                                - active.second->start_ms,
+                            paused,
+                            rate);
+                    }
+                }
                 continue;
             }
 
@@ -770,14 +919,67 @@ public:
             }
 
             color_router_.BindEffect(active.first, effect);
+            PlaybackDiagnostics::Note(QString("clip %1 start (%2, lane %3) at %4 ms")
+                .arg(active.first.Value())
+                .arg(clip.effect_id)
+                .arg(lanes_[clip.lane_index].name)
+                .arg(position_ms));
             color_router_.SetLayerActive(active.first, true);
             manager->Assign(zones, effect);
             runtime_assignments_[active.first] = std::move(zones);
+            if(auto* timed = dynamic_cast<ClipTimedEffect*>(effect))
+            {
+                timed->SetClipTiming(
+                    position_ms - clip.start_ms,
+                    clip.end_ms - clip.start_ms,
+                    paused,
+                    rate);
+            }
             manager->SetEffectActive(effect);
+            any_started = true;
+        }
+        if(any_started)
+        {
+            perf::RecordUi("clip starts", perf::MsSince(starts_begin));
+        }
+
+        const perf::Clock::time_point ends_begin = perf::Clock::now();
+        bool any_ended = false;
+        for(auto assignment = runtime_assignments_.begin();
+            assignment != runtime_assignments_.end();)
+        {
+            if(active_clips.find(assignment->first)
+                == active_clips.end())
+            {
+                PlaybackDiagnostics::Note(QString("clip %1 end at %2 ms")
+                    .arg(assignment->first.Value())
+                    .arg(position_ms));
+                color_router_.SetLayerActive(
+                    assignment->first,
+                    false);
+                const auto effect =
+                    clip_effects_.find(assignment->first);
+                if(effect != clip_effects_.end())
+                {
+                    DeactivateEffect(effect->second.get());
+                }
+                assignment = runtime_assignments_.erase(assignment);
+                any_ended = true;
+            }
+            else
+            {
+                ++assignment;
+            }
+        }
+        if(any_ended)
+        {
+            perf::RecordUi("clip ends", perf::MsSince(ends_begin));
         }
 
         // Playback sync continues through clip gaps until pause/stop/end.
+        const perf::Clock::time_point idle_begin = perf::Clock::now();
         color_router_.RefreshIdleOutput();
+        perf::RecordUi("idle refresh", perf::MsSince(idle_begin));
     }
 
 private:
@@ -811,8 +1013,48 @@ private:
             {
                 return false;
             }
+
+            const auto configured =
+                configured_orientations_.find(clips[index].id);
+            if(configured != configured_orientations_.end()
+                && configured->second != ClipOrientation(clips[index].id))
+            {
+                return false;
+            }
         }
         return true;
+    }
+
+    LayerOrientation ClipOrientation(ClipId clip_id) const
+    {
+        const auto found = clip_effects_.find(clip_id);
+        return found == clip_effects_.end()
+            ? LayerOrientation{}
+            : found->second->Orientation();
+    }
+
+    void SetClipOrientation(
+        ClipId clip_id,
+        LayerOrientation orientation)
+    {
+        const auto found = clip_effects_.find(clip_id);
+        if(found == clip_effects_.end()
+            || found->second->Orientation() == orientation)
+        {
+            return;
+        }
+        found->second->SetOrientation(orientation);
+
+        // Rebuild the clip's layer right away so a paused preview updates
+        // too; during playback the next tick would do the same.
+        if(runtime_running_)
+        {
+            SyncRuntime(
+                last_position_ms_,
+                configured_clips_,
+                last_paused_,
+                last_rate_);
+        }
     }
 
     void ConfigureRoutes(const QVector<TimelineClip>& clips)
@@ -832,6 +1074,7 @@ private:
 
             OpenRgbColorRouter::LayerDefinition definition;
             definition.clip_id = clip.id;
+            definition.orientation = ClipOrientation(clip.id);
             definition.lane_level = lanes_[clip.lane_index].level;
             definition.sequence = sequence;
             for(const RuntimeTarget& target : runtime_targets_)
@@ -850,6 +1093,12 @@ private:
             }
         }
 
+        configured_orientations_.clear();
+        for(const auto& definition : definitions)
+        {
+            configured_orientations_[definition.clip_id] =
+                definition.orientation;
+        }
         color_router_.ConfigureLayers(std::move(definitions));
         configured_clips_ = clips;
         for(const auto& effect : clip_effects_)
@@ -955,7 +1204,8 @@ private:
                     if(ControllerMatches(
                             candidate.controller,
                             lane["controller"])
-                        && candidate.name == saved_name
+                        && (candidate.name == saved_name
+                            || candidate.raw_name == saved_name)
                         && candidate.level == saved_level)
                     {
                         return index;
@@ -997,8 +1247,20 @@ private:
         return FromUtf8String(identity.dump());
     }
 
+    // A lane counts as renamed in LightTrack only when its name differs
+    // from both the OpenRGB display name and the driver name.
+    static QString LaneNameOverride(
+        const LaneEntry& lane,
+        const QString& name)
+    {
+        return name == lane.native_name || name == lane.raw_name
+            ? QString()
+            : name;
+    }
+
     int AddLane(
         const QString& native_name,
+        const QString& raw_name,
         int level,
         RGBControllerInterface* controller,
         int zone_index,
@@ -1006,8 +1268,9 @@ private:
         int led_count)
     {
         LaneEntry lane;
-        lane.name = native_name;
-        lane.native_name = native_name;
+        lane.name = native_name.isEmpty() ? raw_name : native_name;
+        lane.native_name = lane.name;
+        lane.raw_name = raw_name;
         lane.level = level;
         lane.controller = controller;
         lane.zone_index = zone_index;
@@ -1021,12 +1284,15 @@ private:
         const auto saved = lane_states_.find(lane.state_key);
         if(saved != lane_states_.end())
         {
-            if(!saved->second.name.isEmpty())
+            const QString name_override =
+                LaneNameOverride(lane, saved->second.name);
+            if(!name_override.isEmpty())
             {
-                lane.name = saved->second.name;
+                lane.name = name_override;
             }
             lane.highlighted = saved->second.highlighted;
             lane.disabled = saved->second.disabled;
+            lane.hidden = saved->second.hidden;
         }
 
         lanes_.push_back(std::move(lane));
@@ -1197,7 +1463,11 @@ private:
     std::map<ClipId, std::vector<ControllerZone*>>
         runtime_assignments_;
     QVector<TimelineClip> configured_clips_;
+    std::map<ClipId, LayerOrientation> configured_orientations_;
     bool runtime_running_ = false;
+    qint64 last_position_ms_ = 0;
+    bool last_paused_ = false;
+    double last_rate_ = 1.0;
 };
 
 OpenRgbTimelineBackend::OpenRgbTimelineBackend(
@@ -1278,6 +1548,18 @@ bool OpenRgbTimelineBackend::SetLaneDisabled(
     return impl_->SetLaneDisabled(lane_index, disabled);
 }
 
+bool OpenRgbTimelineBackend::SetLaneHidden(
+    int lane_index,
+    bool hidden)
+{
+    return impl_->SetLaneHidden(lane_index, hidden);
+}
+
+OpenRgbTimelineBackend::DeviceSnapshot OpenRgbTimelineBackend::Devices() const
+{
+    return impl_->CurrentDeviceSnapshot();
+}
+
 void OpenRgbTimelineBackend::PrepareForDeviceReload()
 {
     impl_->PrepareForDeviceReload();
@@ -1355,16 +1637,20 @@ void OpenRgbTimelineBackend::ClearClips()
 
 void OpenRgbTimelineBackend::StartRuntime(
     qint64 position_ms,
-    const QVector<TimelineClip>& clips)
+    const QVector<TimelineClip>& clips,
+    bool paused,
+    double rate)
 {
-    impl_->StartRuntime(position_ms, clips);
+    impl_->StartRuntime(position_ms, clips, paused, rate);
 }
 
 void OpenRgbTimelineBackend::SyncRuntime(
     qint64 position_ms,
-    const QVector<TimelineClip>& clips)
+    const QVector<TimelineClip>& clips,
+    bool paused,
+    double rate)
 {
-    impl_->SyncRuntime(position_ms, clips);
+    impl_->SyncRuntime(position_ms, clips, paused, rate);
 }
 
 void OpenRgbTimelineBackend::StopRuntime()

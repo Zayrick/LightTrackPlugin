@@ -92,7 +92,6 @@ function(lighttrack_configure_openrgb_effects target)
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorPicker.cpp"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorsPicker.cpp"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/qt/QtScreenCapturer.cpp"
-    "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/windows/WindowsScreenCapturer.cpp"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/ScreenCapturer.h"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/RGBEffect.h"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/chuck_fft/chuck_fft.c"
@@ -132,7 +131,6 @@ function(lighttrack_configure_openrgb_effects target)
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/qt"
-    "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/windows"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/chuck_fft"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/ctkrangeslider"
     "${OPENRGB_EFFECTS_PLUGIN_DIR}/Dependencies/SimplexNoise/src"
@@ -152,6 +150,12 @@ function(lighttrack_configure_openrgb_effects target)
   endif()
 
   if(WIN32)
+    target_sources("${target}" PRIVATE
+      "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/windows/WindowsScreenCapturer.cpp"
+    )
+    target_include_directories("${target}" PRIVATE
+      "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/windows"
+    )
     target_compile_definitions("${target}" PRIVATE
       _CRT_SECURE_NO_WARNINGS
       _WINSOCK_DEPRECATED_NO_WARNINGS
@@ -164,6 +168,37 @@ function(lighttrack_configure_openrgb_effects target)
       gdi32
       opengl32
     )
+  elseif(UNIX AND NOT APPLE)
+    # Same as the Effects plugin's own Linux build (OpenRGBEffectsPlugin.pro):
+    # Wayland screen capture over PipeWire/DBus, OpenAL audio capture, GL.
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS DBus)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
+    find_package(OpenAL REQUIRED)
+    find_package(OpenGL REQUIRED)
+    find_package(Threads REQUIRED)
+
+    set(wayland_dir "${OPENRGB_EFFECTS_PLUGIN_DIR}/ScreenCapturer/linux/wayland")
+    target_sources("${target}" PRIVATE
+      "${wayland_dir}/DBusScreenCastManager.cpp"
+      "${wayland_dir}/PipeWireCapturer.cpp"
+      "${wayland_dir}/SpaPodUtils.cpp"
+      "${wayland_dir}/PipeWireStreamInfo.cpp"
+      "${wayland_dir}/WaylandScreenCapturer.cpp"
+    )
+    target_include_directories("${target}" PRIVATE
+      "${wayland_dir}"
+      ${OPENAL_INCLUDE_DIR}
+    )
+    target_link_libraries("${target}" PRIVATE
+      "Qt${QT_VERSION_MAJOR}::DBus"
+      PkgConfig::PIPEWIRE
+      ${OPENAL_LIBRARY}
+      OpenGL::GL
+      Threads::Threads
+      ${CMAKE_DL_LIBS}
+    )
+    target_compile_options("${target}" PRIVATE -Wno-psabi)
   endif()
 
   if(MSVC)

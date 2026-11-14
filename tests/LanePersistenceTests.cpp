@@ -2,7 +2,10 @@
 #include "ResourceManagerCallback.h"
 #include "ui/timeline/internal/TimelineEditorInternal.h"
 
+#include <QAction>
 #include <QApplication>
+#include <QDialog>
+#include <QListWidget>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -169,7 +172,7 @@ void AddClip(QWidget* page)
     bool added = false;
     for(QGraphicsView* view : page->findChildren<QGraphicsView*>())
     {
-        const QPoint position = view->mapFromScene(QPointF(220, 45));
+        const QPoint position = view->mapFromScene(QPointF(220, 81));
         QDragEnterEvent enter(position, Qt::CopyAction, &data, Qt::LeftButton, Qt::NoModifier);
         QApplication::sendEvent(view->viewport(), &enter);
         QDropEvent drop(position, Qt::CopyAction, &data, Qt::LeftButton, Qt::NoModifier);
@@ -467,19 +470,19 @@ int main(int argc, char** argv)
             Qt::NoModifier);
         QApplication::sendEvent(timeline_view->viewport(), &event);
     };
-    mouse(QEvent::MouseButtonPress, QPointF(100, 37));
-    mouse(QEvent::MouseMove, QPointF(550, 71));
-    mouse(QEvent::MouseButtonRelease, QPointF(550, 71));
+    mouse(QEvent::MouseButtonPress, QPointF(100, 73));
+    mouse(QEvent::MouseMove, QPointF(550, 107));
+    mouse(QEvent::MouseButtonRelease, QPointF(550, 107));
     Require(timeline_view->scene()->selectedItems().size() == 2,
         "Could not select both clips before group drag");
     const QString before_drag_path = directory.filePath("before-drag.lighttrack");
     FileAction(page, "Save layout", before_drag_path);
     const json before_drag = ReadLayout(before_drag_path);
     Require(before_drag.at("clips").size() == 2, "Group drag fixture must contain two clips");
-    mouse(QEvent::MouseButtonPress, QPointF(220, 54));
-    mouse(QEvent::MouseMove, QPointF(260, 54));
-    mouse(QEvent::MouseMove, QPointF(300, 54));
-    mouse(QEvent::MouseButtonRelease, QPointF(300, 54));
+    mouse(QEvent::MouseButtonPress, QPointF(220, 90));
+    mouse(QEvent::MouseMove, QPointF(260, 90));
+    mouse(QEvent::MouseMove, QPointF(300, 90));
+    mouse(QEvent::MouseButtonRelease, QPointF(300, 90));
     Require(timeline_view->scene()->selectedItems().size() == 2,
         "Group drag did not retain both selected clips");
     const QString after_drag_path = directory.filePath("after-drag.lighttrack");
@@ -505,6 +508,166 @@ int main(int argc, char** argv)
     FileAction(page, "Save layout", redone_drag_path);
     Require(ReadLayout(redone_drag_path) == after_drag,
         "One Redo must restore the whole group move");
+
+    // Waveform style comes from the toolbar menu, is undoable, and quick
+    // save writes it to the current file without any dialog.
+    QAction* line_style = nullptr;
+    for(QAction* action : page->findChildren<QAction*>())
+    {
+        if(action->text() == "Line waveform")
+        {
+            line_style = action;
+        }
+    }
+    Require(line_style != nullptr, "Missing waveform style menu");
+    line_style->trigger();
+    QApplication::processEvents();
+    Require(Button(page, "Undo")->isEnabled(),
+        "Changing the waveform style did not enter history");
+    bool unexpected_dialog = false;
+    QTimer::singleShot(0, [&]()
+    {
+        if(QWidget* modal = QApplication::activeModalWidget())
+        {
+            unexpected_dialog = true;
+            modal->close();
+        }
+    });
+    Button(page, "Quick save")->click();
+    QApplication::processEvents();
+    Require(!unexpected_dialog, "Quick save must not show any dialog");
+    Require(ReadLayout(redone_drag_path).at("music").at("waveformStyle") == "line",
+        "Quick save did not overwrite the current layout file");
+    Require(!NewAction(page, QMessageBox::Cancel),
+        "A quick-saved layout must not count as unsaved");
+
+    // Choose devices: hiding a device removes it from the device list,
+    // is saved in the layout, and can be undone.
+    bool chose_devices = false;
+    QTimer::singleShot(0, [&]()
+    {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        Require(dialog != nullptr, "Expected the choose devices window");
+        auto* list = dialog->findChild<QListWidget*>("chooseDevicesList");
+        Require(list != nullptr && list->count() == 2,
+            "The choose devices window must list every device");
+        Require(list->item(0)->checkState() == Qt::Checked
+            && list->item(1)->checkState() == Qt::Checked,
+            "Devices start out shown");
+        list->item(0)->setCheckState(Qt::Unchecked);
+        chose_devices = true;
+        dialog->accept();
+    });
+    Button(page, "chooseDevicesButton")->click();
+    QApplication::processEvents();
+    Require(chose_devices, "The choose devices window did not open");
+    tree = LaneTree(page);
+    Require(tree->topLevelItem(1)->isHidden() && !tree->topLevelItem(2)->isHidden(),
+        "Only the unchecked device must be hidden");
+    Require(Button(page, "Undo")->isEnabled(), "Hiding a device did not enter history");
+    const QString hidden_path = directory.filePath("hidden-device.lighttrack");
+    FileAction(page, "Save layout", hidden_path);
+    int hidden_lanes = 0;
+    const json hidden_layout = ReadLayout(hidden_path);
+    for(const json& lane : hidden_layout.at("lanes"))
+    {
+        hidden_lanes += lane.value("hidden", false) ? 1 : 0;
+    }
+    Require(hidden_lanes == 1, "The hidden device was not saved in the layout");
+    Button(page, "Undo")->click();
+    tree = LaneTree(page);
+    Require(!tree->topLevelItem(1)->isHidden(), "Undo did not show the device again");
+    FileAction(page, "Load layout", hidden_path);
+    tree = LaneTree(page);
+    Require(tree->topLevelItem(1)->isHidden(), "Loading a layout did not hide the device");
+
+    // Effect settings open in their own window on double-click only.
+    auto* settings_window = page->findChild<QDialog*>("effectSettingsWindow");
+    Require(settings_window != nullptr && !settings_window->isVisible(),
+        "The effect settings window must start closed");
+    AddClip(page);
+    QApplication::processEvents();
+    Require(!settings_window->isVisible(),
+        "Adding or selecting a clip must not open the settings window");
+    QGraphicsView* clip_view = nullptr;
+    for(QGraphicsView* candidate : page->findChildren<QGraphicsView*>())
+    {
+        clip_view = candidate;
+    }
+    Require(clip_view != nullptr, "Missing timeline view");
+    const QPoint clip_point = clip_view->mapFromScene(QPointF(220, 81));
+    const auto send_mouse = [&](QEvent::Type type, Qt::MouseButtons buttons)
+    {
+        QMouseEvent event(type, QPointF(clip_point), QPointF(clip_point),
+            QPointF(clip_view->viewport()->mapToGlobal(clip_point)),
+            Qt::LeftButton, buttons, Qt::NoModifier);
+        QApplication::sendEvent(clip_view->viewport(), &event);
+    };
+    send_mouse(QEvent::MouseButtonPress, Qt::LeftButton);
+    send_mouse(QEvent::MouseButtonRelease, Qt::NoButton);
+    send_mouse(QEvent::MouseButtonDblClick, Qt::LeftButton);
+    send_mouse(QEvent::MouseButtonRelease, Qt::NoButton);
+    QApplication::processEvents();
+    Require(settings_window->isVisible(),
+        "Double-clicking a clip must open the settings window");
+    Require(settings_window->windowTitle().contains("Spectrum"),
+        "The settings window must name the effect");
+    const QString preview_dir = qEnvironmentVariable("LIGHTTRACK_PREVIEW_DIR");
+    if(!preview_dir.isEmpty())
+    {
+        page->grab().save(QDir(preview_dir).filePath("page_layout.png"));
+        settings_window->grab().save(QDir(preview_dir).filePath("settings_window.png"));
+    }
+    QKeyEvent delete_key(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+    QApplication::sendEvent(clip_view, &delete_key);
+    QApplication::processEvents();
+    Require(!settings_window->isVisible(),
+        "Deleting the clip must close its settings window");
+
+    // "Hide disabled zones" filter in the Device header menu.
+    QAction* hide_disabled = nullptr;
+    for(QAction* action : page->findChildren<QAction*>())
+    {
+        if(action->text() == "Hide disabled zones")
+        {
+            hide_disabled = action;
+        }
+    }
+    Require(hide_disabled != nullptr, "Missing the hide disabled zones option");
+    tree = LaneTree(page);
+    QTreeWidgetItem* output_zone = tree->topLevelItem(2)->child(0);
+    QTreeWidgetItem* left_segment = output_zone->child(0);
+    QTreeWidgetItem* right_segment = output_zone->child(1);
+    SetState(left_segment, 2);
+    QApplication::processEvents();
+    Require(!left_segment->isHidden(), "Disabled zones stay visible until the filter is on");
+    hide_disabled->trigger();
+    QApplication::processEvents();
+    Require(left_segment->isHidden() && !right_segment->isHidden(),
+        "The filter must hide only disabled zones");
+    SetState(right_segment, 2);
+    QApplication::processEvents();
+    Require(right_segment->isHidden(), "Disabling a zone with the filter on must hide it");
+    hide_disabled->trigger();
+    QApplication::processEvents();
+    Require(!left_segment->isHidden() && !right_segment->isHidden(),
+        "Turning the filter off must show disabled zones again");
+    SetState(left_segment, 0);
+    SetState(right_segment, 0);
+    QApplication::processEvents();
+
+    // Zones renamed in OpenRGB show their OpenRGB name. Older layouts saved
+    // the driver name ("Output"); loading one must not undo the rename.
+    other.setup.zones[0].display_name = "Desk strip";
+    other.setup.zones[0].flags |= ZONE_FLAG_MANUALLY_CONFIGURED_NAME;
+    plugin->ResourceManagerUpdated(RESOURCEMANAGER_UPDATE_REASON_DEVICE_LIST_UPDATED);
+    QApplication::processEvents();
+    tree = LaneTree(page);
+    Require(tree->topLevelItem(1)->child(0)->text(0) == "Desk strip",
+        "Lane did not use the zone name set in OpenRGB");
+    FileAction(page, "Load layout", defaults_path);
+    Require(tree->topLevelItem(1)->child(0)->text(0) == "Desk strip",
+        "Loading a layout saved with the driver name undid the OpenRGB rename");
 
     plugin->Unload();
     Require(api.virtual_controllers.empty(), "Lane persistence test leaked virtual controllers");

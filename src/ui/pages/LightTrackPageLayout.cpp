@@ -3,13 +3,20 @@
 #include "core/effects/EffectDescriptor.h"
 #include "ui/timeline/TimelineEditor.h"
 
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QTimer>
+#include <QVBoxLayout>
+#include <QToolTip>
 
 #include <set>
 #include <stdexcept>
@@ -39,6 +46,7 @@ struct PreparedClipState
     qint64 start_ms = 0;
     qint64 end_ms = 0;
     OpenRgbTimelineBackend::EffectPtr effect;
+    quint64 group_id = 0;
 };
 }
 
@@ -198,6 +206,7 @@ LayoutSnapshot LightTrackPage::CaptureLayoutState()
     LayoutSnapshot layout;
     layout.music.path = music_path;
     layout.music.duration_ms = music_duration_ms;
+    layout.music.waveform_style = waveform_style;
     layout.lanes = backend.CaptureLaneStates();
 
     const QVector<TimelineClip> clips =
@@ -225,7 +234,8 @@ LayoutSnapshot LightTrackPage::CaptureLayoutState()
             backend.SerializeLane(clip.lane_index),
             clip.start_ms,
             clip.end_ms,
-            backend.ExportClipSettings(clip.id)
+            backend.ExportClipSettings(clip.id),
+            clip.group_id
         });
     }
     return layout;
@@ -379,7 +389,8 @@ bool LightTrackPage::ApplyLayoutState(
                 lane,
                 clip.start_ms,
                 clip.end_ms,
-                std::move(runtime_effect)
+                std::move(runtime_effect),
+                clip.group_id
             });
         }
 
@@ -442,6 +453,7 @@ bool LightTrackPage::ApplyLayoutState(
         const bool music_available = SetMusicFile(
             saved_music_path,
             saved_music_duration);
+        SetWaveformStyle(layout.music.waveform_style, false);
 
         if(!saved_music_path.isEmpty()
             && !music_available)
@@ -459,7 +471,8 @@ bool LightTrackPage::ApplyLayoutState(
                 prepared.lane,
                 prepared.start_ms,
                 prepared.end_ms,
-                prepared.id);
+                prepared.id,
+                prepared.group_id);
             if(clip_id != prepared.id)
             {
                 throw std::runtime_error(
@@ -536,7 +549,7 @@ void LightTrackPage::NewLayout()
         "Select an effect card on the timeline to configure it.");
     current_layout_path.clear();
     persisted_layout.reset();
-    toolbar_save_button->setToolTip("Save layout (Ctrl+S)");
+    UpdateSaveTooltips();
     InitializeHistory();
 }
 
@@ -573,6 +586,14 @@ bool LightTrackPage::SaveLayout()
         path += ".lighttrack";
     }
 
+    return WriteLayout(path, std::move(layout));
+}
+
+bool LightTrackPage::WriteLayout(
+    const QString& path,
+    LayoutSnapshot layout)
+{
+    QString error;
     if(!layout_repository.Save(path, layout, error))
     {
         QMessageBox::critical(
@@ -585,10 +606,63 @@ bool LightTrackPage::SaveLayout()
     current_layout_path =
         QFileInfo(path).absoluteFilePath();
     persisted_layout = std::move(layout);
-    toolbar_save_button->setToolTip(
-        QString("Save layout (Ctrl+S)\nLast saved: %1")
-            .arg(current_layout_path));
+    UpdateSaveTooltips();
     return true;
+}
+
+bool LightTrackPage::QuickSaveLayout()
+{
+    if(current_layout_path.isEmpty())
+    {
+        // Nothing to overwrite yet: ask where to save once.
+        return SaveLayout();
+    }
+
+    FlushPendingHistory();
+
+    QString error;
+    LayoutSnapshot layout;
+    if(!TryCaptureLayoutState(layout, error))
+    {
+        QMessageBox::critical(
+            this,
+            "Cannot save layout",
+            error);
+        return false;
+    }
+
+    if(!WriteLayout(current_layout_path, std::move(layout)))
+    {
+        return false;
+    }
+
+    QToolTip::showText(
+        toolbar_quick_save_button->mapToGlobal(
+            QPoint(0, toolbar_quick_save_button->height())),
+        QString("Saved %1")
+            .arg(QFileInfo(current_layout_path).fileName()),
+        toolbar_quick_save_button,
+        QRect(),
+        1500);
+    return true;
+}
+
+void LightTrackPage::UpdateSaveTooltips()
+{
+    if(current_layout_path.isEmpty())
+    {
+        toolbar_save_button->setToolTip("Save layout (Ctrl+S)");
+        toolbar_quick_save_button->setToolTip(
+            "Quick save\nNot saved yet: asks for a file the first time");
+        return;
+    }
+
+    toolbar_save_button->setToolTip(
+        QString("Save layout (Ctrl+S)\nCurrent file: %1")
+            .arg(current_layout_path));
+    toolbar_quick_save_button->setToolTip(
+        QString("Quick save (no prompts)\nOverwrites: %1")
+            .arg(current_layout_path));
 }
 
 void LightTrackPage::LoadLayout()
@@ -647,15 +721,125 @@ void LightTrackPage::LoadLayout()
     {
         persisted_layout.reset();
     }
-    toolbar_save_button->setToolTip(
-        QString("Save layout (Ctrl+S)\nCurrent file: %1")
-            .arg(current_layout_path));
+    UpdateSaveTooltips();
     if(!warnings.empty())
     {
         QMessageBox::warning(
             this,
             "Layout loaded with warnings",
             warnings.join("\n"));
+    }
+}
+}
+
+namespace lighttrack::ui
+{
+void LightTrackPage::ChooseDevices()
+{
+    const OpenRgbTimelineBackend::DeviceSnapshot devices =
+        backend.Devices();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("Choose devices");
+    dialog.resize(380, 520);
+    QVBoxLayout* layout = new QVBoxLayout(&dialog);
+
+    QLabel* hint = new QLabel(
+        "Checked devices are shown in the timeline. Hidden devices keep "
+        "playing their clips.",
+        &dialog);
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+
+    QLineEdit* search = new QLineEdit(&dialog);
+    search->setPlaceholderText("Search devices");
+    search->setClearButtonEnabled(true);
+    layout->addWidget(search);
+
+    QListWidget* list = new QListWidget(&dialog);
+    list->setObjectName("chooseDevicesList");
+    for(int index = 0; index < devices.lanes.size(); ++index)
+    {
+        const TimelineLane& lane = devices.lanes[index];
+        if(lane.level != 0)
+        {
+            continue;
+        }
+        QListWidgetItem* item = new QListWidgetItem(lane.name, list);
+        item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        item->setCheckState(lane.hidden ? Qt::Unchecked : Qt::Checked);
+        item->setData(Qt::UserRole, index);
+        item->setToolTip(lane.name);
+    }
+    layout->addWidget(list, 1);
+
+    QHBoxLayout* bulk = new QHBoxLayout();
+    QPushButton* show_all = new QPushButton("Show all", &dialog);
+    QPushButton* hide_all = new QPushButton("Hide all", &dialog);
+    show_all->setToolTip("Show every device matching the search");
+    hide_all->setToolTip("Hide every device matching the search");
+    bulk->addWidget(show_all);
+    bulk->addWidget(hide_all);
+    bulk->addStretch(1);
+    layout->addLayout(bulk);
+
+    QDialogButtonBox* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+        &dialog);
+    layout->addWidget(buttons);
+
+    connect(search, &QLineEdit::textChanged, &dialog,
+        [list](const QString& text)
+        {
+            for(int row = 0; row < list->count(); ++row)
+            {
+                QListWidgetItem* item = list->item(row);
+                item->setHidden(
+                    !item->text().contains(text, Qt::CaseInsensitive));
+            }
+        });
+    const auto set_matching = [list](Qt::CheckState state)
+    {
+        for(int row = 0; row < list->count(); ++row)
+        {
+            QListWidgetItem* item = list->item(row);
+            if(!item->isHidden())
+            {
+                item->setCheckState(state);
+            }
+        }
+    };
+    connect(show_all, &QPushButton::clicked, &dialog,
+        [set_matching]() { set_matching(Qt::Checked); });
+    connect(hide_all, &QPushButton::clicked, &dialog,
+        [set_matching]() { set_matching(Qt::Unchecked); });
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    if(dialog.exec() != QDialog::Accepted)
+    {
+        return;
+    }
+
+    bool changed = false;
+    for(int row = 0; row < list->count(); ++row)
+    {
+        const QListWidgetItem* item = list->item(row);
+        const int lane_index = item->data(Qt::UserRole).toInt();
+        const bool hidden = item->checkState() != Qt::Checked;
+        if(devices.lanes[lane_index].hidden == hidden)
+        {
+            continue;
+        }
+        if(backend.SetLaneHidden(lane_index, hidden))
+        {
+            timeline_editor->SetLaneHidden(lane_index, hidden);
+            changed = true;
+        }
+    }
+    if(changed)
+    {
+        CommitHistorySnapshot();
     }
 }
 }

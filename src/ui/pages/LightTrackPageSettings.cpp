@@ -2,6 +2,7 @@
 
 #include "ui/timeline/TimelineEditor.h"
 
+#include <QDialog>
 #include <QAbstractButton>
 #include <QAbstractSlider>
 #include <QAction>
@@ -264,6 +265,29 @@ void LightTrackPage::ShowClipSettings(
     }
 }
 
+void LightTrackPage::OpenClipSettingsWindow(ClipId clip_id)
+{
+    ShowClipSettings(clip_id);
+    const std::optional<TimelineClip> clip =
+        timeline_editor->FindClip(clip_id);
+    EffectDescriptor effect;
+    settings_window->setWindowTitle(
+        clip.has_value() && backend.FindEffect(clip->effect_id, effect)
+            ? QString("Effect Settings - %1").arg(effect.name)
+            : QString("Effect Settings"));
+    settings_window->show();
+    settings_window->raise();
+    settings_window->activateWindow();
+}
+
+void LightTrackPage::HideEmptySettingsWindow()
+{
+    if(settings_stack->currentWidget() == settings_placeholder)
+    {
+        settings_window->hide();
+    }
+}
+
 void LightTrackPage::RemoveClipSettings(ClipId clip_id)
 {
     if(!clip_id.IsValid())
@@ -294,6 +318,7 @@ void LightTrackPage::RemoveClipSettings(ClipId clip_id)
     settings_stack->removeWidget(settings_widget);
     delete settings_widget;
     clip_settings.erase(settings);
+    HideEmptySettingsWindow();
 }
 
 void LightTrackPage::DuplicateClipSettings(
@@ -364,5 +389,6 @@ void LightTrackPage::ClearAllClipSettings()
         delete entry.second;
     }
     clip_settings.clear();
+    HideEmptySettingsWindow();
 }
 }

@@ -13,6 +13,30 @@ class OpenRGBPluginAPIInterface;
 
 namespace lighttrack::openrgb
 {
+// How a clip's effect is laid onto its LEDs. Matrix zones get a rotated /
+// mirrored matrix map, so every effect renders in the corrected direction;
+// strips are reversed by 180 degrees or mirror.
+struct LayerOrientation
+{
+    int rotation = 0; // clockwise degrees: 0, 90, 180 or 270
+    bool mirror = false; // flip left/right before rotating
+
+    bool IsIdentity() const { return rotation == 0 && !mirror; }
+    bool operator==(const LayerOrientation& other) const
+    {
+        return rotation == other.rotation && mirror == other.mirror;
+    }
+    bool operator!=(const LayerOrientation& other) const
+    {
+        return !(*this == other);
+    }
+};
+
+// Applies the orientation to a matrix map in place.
+void TransformMatrixMap(
+    matrix_map_type& matrix,
+    const LayerOrientation& orientation);
+
 class OpenRgbColorRouter
 {
 public:
@@ -22,6 +46,7 @@ public:
         int lane_level = 0;
         int sequence = 0;
         std::vector<ControllerZone*> targets;
+        LayerOrientation orientation;
     };
 
     struct TargetOverride
@@ -30,7 +55,18 @@ public:
         RGBColor color = 0;
     };
 
-    explicit OpenRgbColorRouter(OpenRGBPluginAPIInterface* plugin_api);
+    // Threaded: each physical device is written on its own thread, so a
+    // slow or stuck device never holds the frame lock. Synchronous: writes
+    // happen inside the calls below (tests).
+    enum class OutputMode
+    {
+        Threaded,
+        Synchronous
+    };
+
+    explicit OpenRgbColorRouter(
+        OpenRGBPluginAPIInterface* plugin_api,
+        OutputMode output_mode = OutputMode::Threaded);
     ~OpenRgbColorRouter();
 
     OpenRgbColorRouter(const OpenRgbColorRouter&) = delete;
@@ -50,6 +86,9 @@ public:
     void RefreshIdleOutput();
     void StopOutput();
     void Blackout();
+
+    // Waits until queued device writes are applied (tests).
+    bool WaitForOutput(int timeout_ms);
 
 private:
     class Impl;

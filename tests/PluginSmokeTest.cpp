@@ -12,6 +12,9 @@
 #include <QPluginLoader>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QAction>
+#include <QMenu>
+#include <QMenuBar>
 #include <QTreeWidget>
 
 #include <atomic>
@@ -86,12 +89,15 @@ int main(int argc, char** argv)
         Require(page != nullptr && page == plugin->GetWidget(), "GetWidget must return the existing page");
         Require(api.detection_waits == static_cast<unsigned int>(cycle + 1), "Detection should be awaited once per page");
 
+        // Effects live in the "Effects" menu strip: one menu per category.
         int effects = 0;
-        for(QTreeWidget* tree : page->findChildren<QTreeWidget*>())
+        auto* effects_bar = page->findChild<QMenuBar*>("effectsMenuBar");
+        Require(effects_bar != nullptr, "Missing the effects menu strip");
+        for(QAction* category : effects_bar->actions())
         {
-            for(int category = 0; category < tree->topLevelItemCount(); ++category)
+            if(category->menu() != nullptr)
             {
-                effects += tree->topLevelItem(category)->childCount();
+                effects += category->menu()->actions().size();
             }
         }
         Require(effects > 0, "The release_1.0 effect catalog is empty");
@@ -157,7 +163,7 @@ int main(int argc, char** argv)
     bool added = false;
     for(QGraphicsView* view : device_page->findChildren<QGraphicsView*>())
     {
-        const QPoint position = view->mapFromScene(QPointF(220, 45));
+        const QPoint position = view->mapFromScene(QPointF(220, 81));
         QDragEnterEvent enter(position, Qt::CopyAction, &effect_data, Qt::LeftButton, Qt::NoModifier);
         QApplication::sendEvent(view->viewport(), &enter);
         QDropEvent drop(position, Qt::CopyAction, &effect_data, Qt::LeftButton, Qt::NoModifier);

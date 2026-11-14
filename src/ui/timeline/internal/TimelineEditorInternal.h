@@ -36,6 +36,8 @@ class QGraphicsSceneHoverEvent;
 class QGraphicsSceneMouseEvent;
 class QKeyEvent;
 class QLabel;
+class QAction;
+class QMenu;
 class QMouseEvent;
 class QPainter;
 class QPaintEvent;
@@ -55,6 +57,8 @@ inline constexpr const char* CLIP_MIME =
     "application/x-lighttrack-timeline-clips";
 
 inline constexpr qreal ROW_HEIGHT = 36.0;
+// The music row shows the left channel on top and the right one below.
+inline constexpr qreal MUSIC_ROW_HEIGHT = 2.0 * ROW_HEIGHT;
 inline constexpr qreal EFFECT_ROW_HEIGHT = 28.0;
 inline constexpr qreal CLIP_HEIGHT = 32.0;
 inline constexpr qint64 CLIP_MIN_DURATION_MS = 1;
@@ -82,7 +86,8 @@ enum EffectListRole
     LaneActionStateRole,
     LaneCommittedNameRole,
     LaneCommittedActionStateRole,
-    LaneLedCountRole
+    LaneLedCountRole,
+    LaneHiddenRole
 };
 
 struct LaneInfo
@@ -183,15 +188,43 @@ public:
         const QVector<qreal>& new_levels,
         qreal new_width,
         qreal new_height);
+    // Left/right channel peaks; when empty, the mono levels are drawn in
+    // both channel bands.
+    void SetPeaks(const WaveformPeaks& new_peaks);
+    void SetStyle(WaveformStyle new_style);
+    // Playhead x in item coordinates (used by the Progress style).
+    void SetPlayedWidth(qreal played_width);
     void paint(
         QPainter* painter,
-        const QStyleOptionGraphicsItem*,
+        const QStyleOptionGraphicsItem* option,
         QWidget*) override;
 
 private:
+    // One channel's drawing area: vertical center and half-height.
+    struct Band
+    {
+        int channel = 0;
+        qreal top = 0.0;
+        qreal height = 0.0;
+        qreal Center() const { return top + height / 2.0; }
+        qreal Amplitude() const { return height * 0.46; }
+    };
+
+    // Loudest level (0..1) of a channel in the item x range [x0, x1].
+    qreal Peak(int channel, qreal x0, qreal x1) const;
+    // Lowest/highest sample (-1..1) of a channel in [x0, x1].
+    void MinMax(int channel, qreal x0, qreal x1, qreal& low, qreal& high) const;
+    void PaintSmooth(QPainter* painter, const Band& band, qreal x0, qreal x1, bool fill) const;
+    void PaintBars(QPainter* painter, const Band& band, qreal x0, qreal x1, bool progress) const;
+    void PaintClassic(QPainter* painter, const Band& band, qreal x0, qreal x1) const;
+    void PaintStudio(QPainter* painter, const Band& band, qreal x0, qreal x1) const;
+
     QVector<qreal> levels;
+    WaveformPeaks peaks;
     qreal width = 0.0;
     qreal height = 0.0;
+    qreal played = 0.0;
+    WaveformStyle style = WaveformStyle::Studio;
 };
 
 class TimelineClipItem final : public QGraphicsItem
@@ -214,8 +247,11 @@ public:
     bool IsResizeHandle(const QPointF& pos) const;
     bool IsLeftResizeHandle(const QPointF& pos) const;
     bool IsRightResizeHandle(const QPointF& pos) const;
+    quint64 GroupId() const { return group_id; }
+    void SetGroupId(quint64 value) { group_id = value; update(); }
 
 private:
+    quint64 group_id = 0;
     ClipId id;
     EffectDescriptor effect;
     int lane_index = 0;
@@ -237,10 +273,14 @@ public:
         const QVector<qreal>& spectrum,
         qint64 duration_ms);
     void SetMusicPosition(qint64 position_ms);
+    void SetWaveformStyle(WaveformStyle style);
+    void SetMusicPeaks(const WaveformPeaks& peaks);
     void SetMinimumContentDuration(qint64 duration_ms);
     void SetMusicSeekCallback(TimelineEditor::MusicSeekCallback callback);
     void SetClipSelectedCallback(
         TimelineEditor::ClipSelectedCallback callback);
+    void SetClipActivatedCallback(
+        TimelineEditor::ClipActivatedCallback callback);
     void SetClipRemovedCallback(
         TimelineEditor::ClipRemovedCallback callback);
     void SetClipDuplicatedCallback(
@@ -253,7 +293,8 @@ public:
         int lane,
         qint64 start_ms,
         qint64 end_ms,
-        ClipId requested_id);
+        ClipId requested_id,
+        quint64 group_id = 0);
     void SetSnappingEnabled(bool enabled);
     bool SetPixelsPerSecond(qreal value);
     qreal PixelsPerSecond() const;
@@ -277,8 +318,21 @@ protected:
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
+
+public:
+    // Grouping: grouped clips select and move together.
+    bool GroupSelectedClips();
+    bool UngroupSelectedClips();
+    bool CanGroupSelection() const;
+    bool CanUngroupSelection() const;
 
 private:
+    // Selects/deselects every clip in the clicked clip's group.
+    void SetGroupSelected(const TimelineClipItem* clip, bool selected);
+    // Grows the selection to whole groups.
+    void ExpandSelectionToGroups();
+    quint64 NextGroupId() const;
     enum DragMode
     {
         NoDrag,
@@ -382,8 +436,11 @@ private:
     QVector<TimelineClipItem*> clips;
     QString empty_message;
     QVector<qreal> music_spectrum;
+    WaveformPeaks music_peaks;
+    WaveformStyle waveform_style = WaveformStyle::Studio;
     TimelineEditor::MusicSeekCallback music_seek_callback;
     TimelineEditor::ClipSelectedCallback clip_selected_callback;
+    TimelineEditor::ClipActivatedCallback clip_activated_callback;
     TimelineEditor::ClipRemovedCallback clip_removed_callback;
     TimelineEditor::ClipDuplicatedCallback
         clip_duplicated_callback;
@@ -431,6 +488,13 @@ public:
     void SetScrollOffset(int offset);
     void SetHideZeroLedZonesChangedCallback(
         std::function<void(bool)> callback);
+    void SetHideDisabledLanesChangedCallback(
+        std::function<void(bool)> callback);
+    void SetChooseDevicesRequestedCallback(
+        std::function<void()> callback);
+    void SetExpandAllRequestedCallback(
+        std::function<void(bool)> callback);
+    void SetDevicesExpanded(bool expanded);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -443,8 +507,18 @@ private:
     qreal pixels_per_second = GRID_WIDTH;
     int horizontal_offset = 0;
     QPushButton* hide_zero_led_zones_button = nullptr;
+    QMenu* lane_filter_menu = nullptr;
+    QAction* hide_zero_led_action = nullptr;
+    QAction* hide_disabled_action = nullptr;
+    std::function<void(bool)> hide_disabled_lanes_changed_callback;
+    void UpdateLaneFilterButton();
     std::function<void(bool)>
         hide_zero_led_zones_changed_callback;
+    QPushButton* expand_all_button = nullptr;
+    QPushButton* choose_devices_button = nullptr;
+    std::function<void()> choose_devices_requested_callback;
+    std::function<void(bool)> expand_all_requested_callback;
+    bool devices_expanded = true;
 };
 
 class LaneListWidget final : public QTreeWidget
@@ -463,6 +537,12 @@ public:
     void SetLaneDisabledCallback(
         TimelineEditor::LaneStateChangedCallback callback);
     void SetHideZeroLedZones(bool hide);
+    void SetHideDisabledLanes(bool hide);
+    void SetLaneHidden(int lane_index, bool hidden);
+    void SetAllExpanded(bool expanded);
+    bool AnyDeviceExpanded() const;
+    void SetExpansionChangedCallback(
+        std::function<void(bool)> callback);
     QVector<int> VisibleLaneIndices() const;
 
 protected:
@@ -479,8 +559,12 @@ private:
     bool ApplyZeroLedFilter(QTreeWidgetItem* item);
     void HandleItemChanged(QTreeWidgetItem* item, int column);
     void NotifyVisibleLanesChanged();
+    void HandleExpansionChanged();
     bool rebuilding = false;
+    std::function<void(bool)> expansion_changed_callback;
     bool hide_zero_led_zones = false;
+    bool hide_disabled_lanes = false;
+    void ReapplyFilters();
     std::function<void(const QVector<int>&)>
         visibility_changed_callback;
     std::function<void(int)> width_changed_callback;
@@ -518,6 +602,10 @@ public:
         const QVector<qreal>& spectrum,
         qint64 duration_ms);
     void SetMusicPosition(qint64 position_ms, bool turn_page);
+    // When off, playback never scrolls the view by itself.
+    void SetFollowPlayhead(bool follow) { follow_playhead = follow; }
+    void SetWaveformStyle(WaveformStyle style);
+    void SetMusicPeaks(const WaveformPeaks& peaks);
     void SetMinimumTimelineDuration(qint64 duration_ms);
     QVector<TimelineClip> TimelineClips() const;
     QVector<TimelineClip> PersistentTimelineClips() const;
@@ -527,11 +615,19 @@ public:
         int lane,
         qint64 start_ms,
         qint64 end_ms,
-        ClipId requested_id);
+        ClipId requested_id,
+        quint64 group_id = 0);
     void SetMusicSeekCallback(
         TimelineEditor::MusicSeekCallback callback);
     void SetClipSelectedCallback(
         TimelineEditor::ClipSelectedCallback callback);
+    void SetClipActivatedCallback(
+        TimelineEditor::ClipActivatedCallback callback);
+    // Placement mode: the effect follows the mouse and a left click on a
+    // lane places it. Esc or right-click cancels.
+    void BeginPlacement(const QString& effect_id);
+    void CancelPlacement();
+    bool IsPlacing() const { return !placing_effect_id.isEmpty(); }
     void SetClipRemovedCallback(
         TimelineEditor::ClipRemovedCallback callback);
     void SetClipDuplicatedCallback(
@@ -550,6 +646,12 @@ protected:
     void dragMoveEvent(QDragMoveEvent* event) override;
     void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
 
 private:
     static constexpr qreal PAGE_TURN_TRIGGER_RATIO = 0.84;
@@ -560,5 +662,22 @@ private:
     LightTrackScene* light_scene;
     TimelineRulerWidget* ruler = nullptr;
     QPropertyAnimation* page_turn_animation = nullptr;
+    QVector<EffectGroup> effect_groups;
+    QString placing_effect_id;
+    bool swallow_release = false;
+    bool cancelled_by_right_click = false;
+    bool follow_playhead = true;
 };
+
+// Fills a menu with one submenu per effect category; on_chosen receives the
+// chosen effect id.
+void PopulateEffectMenu(
+    QMenu* menu,
+    const QVector<EffectGroup>& groups,
+    const std::function<void(const QString&)>& on_chosen);
+// Adds one action per effect of a single category.
+void AddEffectActions(
+    QMenu* menu,
+    const EffectGroup& group,
+    const std::function<void(const QString&)>& on_chosen);
 }
