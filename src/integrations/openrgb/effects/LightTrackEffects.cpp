@@ -8,12 +8,17 @@
 #include "integrations/openrgb/effects/ClipTimedEffect.h"
 
 #include "ColorUtils.h"
+#include "ColorsPicker.h"
 #include "EffectRegisterer.h"
 #include "hsv.h"
+
+#include <QFormLayout>
+#include <QSlider>
 
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <mutex>
 #include <random>
 #include <vector>
 
@@ -1296,6 +1301,285 @@ private:
     double last_seconds = -1.0;
 };
 REGISTER_EFFECT(Sparkle);
+
+/*-------------------------------------------------------------*\
+| Flying Windows: four-color window panes fly out of the center |
+| towards you, growing as they come closer, then leave past the |
+| edges. Flying Windows (Reverse) flies them back into the      |
+| distance. "Windows" sets how many are on screen; Speed sets   |
+| how fast they fly. Strips show the panes crossing their row.  |
+| Own settings: the pane colors (any number; four classic ones  |
+| by default) and Spacing, how far apart the windows fly.       |
+\*-------------------------------------------------------------*/
+class FlyingWindowsBase : public SimpleEffect
+{
+public:
+    FlyingWindowsBase(
+        const std::string& class_name,
+        const std::string& ui_name,
+        const std::string& description,
+        bool reverse) :
+        SimpleEffect(class_name, ui_name, description, 0),
+        reverse(reverse)
+    {
+        UseSpeed(1, 100, 30);
+        UseSlider2("Windows", 1, 30, 10);
+
+        // Shown by the effect page below the standard controls.
+        EffectDetails.HasCustomSettings = true;
+        QFormLayout* layout = new QFormLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        colors_picker = new ColorsPicker(this);
+        colors_picker->SetText("Pane colors");
+        spacing_slider = new QSlider(Qt::Horizontal, this);
+        spacing_slider->setRange(0, 100);
+        spacing_slider->setValue(DEFAULT_SPACING);
+        spacing_slider->setToolTip(
+            "Low: windows fly close together. "
+            "High: evenly spread out and further apart.");
+        layout->addRow(colors_picker);
+        layout->addRow("Spacing", spacing_slider);
+
+        connect(colors_picker, &ColorsPicker::ColorsChanged, this, [this]()
+        {
+            StoreColors(colors_picker->Colors());
+        });
+        connect(spacing_slider, &QSlider::valueChanged, this, [this](int value)
+        {
+            spacing.store(value);
+        });
+        colors_picker->SetColors(DefaultColors());
+    }
+
+    json SaveCustomSettings() override
+    {
+        json settings;
+        settings["colors"] = PaneColors();
+        settings["spacing"] = spacing.load();
+        return settings;
+    }
+
+    void LoadCustomSettings(json settings) override
+    {
+        if(settings.contains("colors") && settings["colors"].is_array())
+        {
+            std::vector<RGBColor> colors;
+            for(const json& color : settings["colors"])
+            {
+                if(color.is_number_unsigned())
+                {
+                    colors.push_back(color.get<RGBColor>());
+                }
+            }
+            colors_picker->SetColors(colors);
+        }
+        if(settings.contains("spacing") && settings["spacing"].is_number())
+        {
+            spacing_slider->setValue(
+                std::clamp(settings["spacing"].get<int>(), 0, 100));
+        }
+    }
+
+    void StepEffect(std::vector<ControllerZone*> zones) override
+    {
+        const int windows = static_cast<int>(std::max(1u, GetSlider2Val()));
+        // Speed 1..100 -> about 12 s .. 1.1 s from the center to the edge.
+        const double life = 120.0 / (GetSpeed() + 9.0);
+        const double t = ElapsedSeconds() / life;
+        const double spread_amount = spacing.load() / 100.0;
+        std::vector<RGBColor> colors = PaneColors();
+        if(colors.empty())
+        {
+            colors.push_back(ToRGBColor(255, 255, 255));
+        }
+
+        struct Pane
+        {
+            double depth; // 1 = far (center), small = close
+            double angle;
+            double spread;
+            int color_offset; // first color of this window
+        };
+        std::vector<Pane> panes;
+        panes.reserve(static_cast<std::size_t>(windows));
+        for(int k = 0; k < windows; ++k)
+        {
+            // Windows start evenly staggered; each new flight of the same
+            // window picks a new direction. All derived from clip time, so
+            // seeking shows the same picture every time.
+            const double cycle_time = t + static_cast<double>(k) / windows;
+            const double cycle = std::floor(cycle_time);
+            const double age = cycle_time - cycle;
+            const double seed = k * 7.31 + cycle * 3.17;
+            Pane pane;
+            pane.depth = reverse ? age : 1.0 - age;
+            // Spacing blends random directions into evenly spread ones
+            // (golden angle) and pushes the windows further out.
+            const double evenly = Fraction(k * 0.618034 + cycle * 0.371);
+            pane.angle = 2.0 * kPi
+                * (evenly + (1.0 - spread_amount) * Hash(seed));
+            pane.spread = (0.2 + 0.8 * Hash(seed + 1.7))
+                * (0.4 + 1.6 * spread_amount);
+            pane.color_offset = (k + static_cast<int>(cycle)) * 4;
+            panes.push_back(pane);
+        }
+        // Far panes first, so closer ones cover them.
+        std::sort(
+            panes.begin(),
+            panes.end(),
+            [](const Pane& left, const Pane& right)
+            {
+                return left.depth > right.depth;
+            });
+
+        for(ControllerZone* zone : zones)
+        {
+            const Geometry geometry = Points(zone, 0.5);
+            const double cx = geometry.width / 2.0;
+            const double cy = geometry.height / 2.0;
+            const double reach = std::hypot(cx, cy);
+            const double base_size =
+                std::max(1.0, std::min(geometry.width, geometry.height) * 0.1);
+
+            struct Placed
+            {
+                double x;
+                double y;
+                double half;
+                double level;
+                int color_offset;
+            };
+            std::vector<Placed> placed;
+            placed.reserve(panes.size());
+            for(const Pane& pane : panes)
+            {
+                const double depth = std::max(0.08, pane.depth);
+                const double distance = pane.spread * reach * 0.25 / depth;
+                Placed value;
+                value.x = cx + std::cos(pane.angle) * distance;
+                value.y = cy + std::sin(pane.angle) * distance;
+                value.half = base_size * 0.5 / depth;
+                // Dim in the distance, full brightness up close.
+                value.level = std::clamp((1.0 - pane.depth) * 3.0, 0.0, 1.0);
+                value.color_offset = pane.color_offset;
+                placed.push_back(value);
+            }
+
+            const int count = static_cast<int>(geometry.x.size());
+            for(int i = 0; i < count; ++i)
+            {
+                const double px = geometry.x[static_cast<std::size_t>(i)];
+                const double py = geometry.y[static_cast<std::size_t>(i)];
+                double r = 0.0;
+                double g = 0.0;
+                double b = 0.0;
+                for(const Placed& pane : placed)
+                {
+                    const double dx = px - pane.x;
+                    const double dy = py - pane.y;
+                    // Soft edges so small panes still glide between LEDs.
+                    const double cover =
+                        std::clamp(pane.half - std::abs(dx) + 0.5, 0.0, 1.0)
+                        * std::clamp(pane.half - std::abs(dy) + 0.5, 0.0, 1.0);
+                    if(cover <= 0.0)
+                    {
+                        continue;
+                    }
+                    // Dark cross between the four panes once it is big.
+                    const double bar = pane.half * 0.12;
+                    if(pane.half > 2.5
+                        && (std::abs(dx) < bar || std::abs(dy) < bar))
+                    {
+                        r *= 1.0 - cover;
+                        g *= 1.0 - cover;
+                        b *= 1.0 - cover;
+                        continue;
+                    }
+                    // Quadrants: top left, top right, bottom left, bottom
+                    // right. With more than four colors each window starts
+                    // further along the list, so all of them show up.
+                    const int quadrant = (dy < 0.0 ? 0 : 2) + (dx < 0.0 ? 0 : 1);
+                    const RGBColor color = colors[static_cast<std::size_t>(
+                        (pane.color_offset + quadrant) % static_cast<int>(colors.size()))];
+                    r += (RGBGetRValue(color) * pane.level - r) * cover;
+                    g += (RGBGetGValue(color) * pane.level - g) * cover;
+                    b += (RGBGetBValue(color) * pane.level - b) * cover;
+                }
+                SetLed(zone, i, ToRGBColor(Channel(r), Channel(g), Channel(b)));
+            }
+        }
+    }
+
+private:
+    static constexpr int DEFAULT_SPACING = 40;
+
+    static std::vector<RGBColor> DefaultColors()
+    {
+        return {
+            ToRGBColor(255, 0, 0),
+            ToRGBColor(0, 255, 0),
+            ToRGBColor(0, 0, 255),
+            ToRGBColor(255, 200, 0)};
+    }
+
+    static double Hash(double value)
+    {
+        return Fraction(std::sin(value * 12.9898 + 4.1414) * 43758.5453);
+    }
+
+    // The picker lives on the UI thread; frames are drawn on the effect
+    // thread, so it reads this copy.
+    void StoreColors(std::vector<RGBColor> colors)
+    {
+        std::lock_guard<std::mutex> guard(colors_mutex);
+        pane_colors = std::move(colors);
+    }
+
+    std::vector<RGBColor> PaneColors() const
+    {
+        std::lock_guard<std::mutex> guard(colors_mutex);
+        return pane_colors;
+    }
+
+    bool reverse;
+    ColorsPicker* colors_picker = nullptr;
+    QSlider* spacing_slider = nullptr;
+    mutable std::mutex colors_mutex;
+    std::vector<RGBColor> pane_colors = DefaultColors();
+    std::atomic<int> spacing{DEFAULT_SPACING};
+};
+
+class FlyingWindows final : public FlyingWindowsBase
+{
+public:
+    LIGHTTRACK_EFFECT(FlyingWindows, "Flying Windows");
+
+    FlyingWindows() :
+        FlyingWindowsBase(
+            ClassName(),
+            UI_Name(),
+            "Four-color window panes fly out of the center towards you",
+            false)
+    {
+    }
+};
+REGISTER_EFFECT(FlyingWindows);
+
+class FlyingWindowsReverse final : public FlyingWindowsBase
+{
+public:
+    LIGHTTRACK_EFFECT(FlyingWindowsReverse, "Flying Windows (Reverse)");
+
+    FlyingWindowsReverse() :
+        FlyingWindowsBase(
+            ClassName(),
+            UI_Name(),
+            "Four-color window panes fly away from you into the center",
+            true)
+    {
+    }
+};
+REGISTER_EFFECT(FlyingWindowsReverse);
 
 #undef LIGHTTRACK_EFFECT
 }

@@ -144,6 +144,40 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // Flying Windows keeps its own pane colors and spacing in the clip's
+    // custom settings (saved in the .lighttrack file).
+    {
+        std::unique_ptr<RGBEffect> saved(
+            EffectListManager::get()->GetEffectConstructor(
+                "LightTrackFlyingWindows")());
+        if(!saved || !saved->EffectDetails.HasCustomSettings)
+        {
+            std::cerr << "Flying Windows has no custom settings\n";
+            return 1;
+        }
+        const json defaults = saved->SaveCustomSettings();
+        if(defaults["colors"].size() != 4 || defaults["spacing"] != 40)
+        {
+            std::cerr << "Unexpected Flying Windows defaults: "
+                      << defaults.dump() << '\n';
+            return 1;
+        }
+        json custom;
+        custom["colors"] = {0x0000FFu, 0x00FF00u, 0xFF0000u, 0xFFFFFFu, 0x00FFFFu};
+        custom["spacing"] = 85;
+        saved->LoadCustomSettings(custom);
+        std::unique_ptr<RGBEffect> loaded(
+            EffectListManager::get()->GetEffectConstructor(
+                "LightTrackFlyingWindows")());
+        loaded->LoadCustomSettings(saved->SaveCustomSettings());
+        if(loaded->SaveCustomSettings() != custom)
+        {
+            std::cerr << "Flying Windows settings did not round-trip: "
+                      << loaded->SaveCustomSettings().dump() << '\n';
+            return 1;
+        }
+    }
+
     constexpr int cell = 6;
     constexpr int label_width = 150;
     constexpr int frame_width = MATRIX_WIDTH * cell;

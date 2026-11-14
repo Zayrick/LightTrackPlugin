@@ -55,7 +55,18 @@ public:
         RGBColor color = 0;
     };
 
-    explicit OpenRgbColorRouter(OpenRGBPluginAPIInterface* plugin_api);
+    // Threaded: each physical device is written on its own thread, so a
+    // slow or stuck device never holds the frame lock. Synchronous: writes
+    // happen inside the calls below (tests).
+    enum class OutputMode
+    {
+        Threaded,
+        Synchronous
+    };
+
+    explicit OpenRgbColorRouter(
+        OpenRGBPluginAPIInterface* plugin_api,
+        OutputMode output_mode = OutputMode::Threaded);
     ~OpenRgbColorRouter();
 
     OpenRgbColorRouter(const OpenRgbColorRouter&) = delete;
@@ -75,6 +86,9 @@ public:
     void RefreshIdleOutput();
     void StopOutput();
     void Blackout();
+
+    // Waits until queued device writes are applied (tests).
+    bool WaitForOutput(int timeout_ms);
 
 private:
     class Impl;

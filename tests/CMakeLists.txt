@@ -26,6 +26,7 @@ add_executable(lighttrack_openrgb_runtime_tests
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbEffectManager.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbRenderCoordinator.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OpenRgbColorRouter.cpp"
+  "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/OutputWriter.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/PlaybackDiagnostics.cpp"
   "${PROJECT_SOURCE_DIR}/src/integrations/openrgb/PerformanceStats.cpp"
   "${OPENRGB_DIR}/qt/hsv.cpp"
@@ -58,6 +59,12 @@ add_executable(lighttrack_effects_tests
   "${OPENRGB_EFFECTS_PLUGIN_DIR}/ControllerZone.cpp"
   "${OPENRGB_EFFECTS_PLUGIN_DIR}/EffectListManager.cpp"
   "${OPENRGB_EFFECTS_PLUGIN_DIR}/Effects/RGBEffect.h"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorPicker.h"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorPicker.cpp"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorPicker.ui"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorsPicker.h"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorsPicker.cpp"
+  "${OPENRGB_EFFECTS_PLUGIN_DIR}/ColorsPicker.ui"
 )
 target_include_directories(lighttrack_effects_tests PRIVATE
   "${PROJECT_SOURCE_DIR}/src"
@@ -73,6 +80,7 @@ target_link_libraries(lighttrack_effects_tests PRIVATE
 )
 set_target_properties(lighttrack_effects_tests PROPERTIES
   AUTOMOC ON
+  AUTOUIC ON
 )
 
 add_executable(lighttrack_timeline_tests

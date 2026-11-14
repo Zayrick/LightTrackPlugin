@@ -78,6 +78,8 @@ add_library(LightTrackPlugin SHARED
   src/integrations/openrgb/PlaybackDiagnostics.cpp
   src/integrations/openrgb/PerformanceStats.h
   src/integrations/openrgb/PerformanceStats.cpp
+  src/integrations/openrgb/OutputWriter.h
+  src/integrations/openrgb/OutputWriter.cpp
   src/integrations/openrgb/LayerBufferController.h
   src/integrations/openrgb/LayerBufferControllerDefaults.inc
   src/integrations/openrgb/effects/ClipTimedEffect.h

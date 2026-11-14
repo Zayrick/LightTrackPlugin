@@ -3,14 +3,12 @@
 #include "integrations/openrgb/OpenRgbRenderCoordinator.h"
 #include "integrations/openrgb/PlaybackDiagnostics.h"
 #include "integrations/openrgb/LayerBufferController.h"
+#include "integrations/openrgb/OutputWriter.h"
 
 #include "ColorUtils.h"
 #include "ControllerZone.h"
 #include "RGBEffect.h"
 #include "OpenRGBPluginInterface.h"
-
-#include <QCoreApplication>
-#include <QTimer>
 
 #include <algorithm>
 #include <functional>
@@ -284,7 +282,11 @@ void TransformMatrixMap(
 class OpenRgbColorRouter::Impl
 {
 public:
-    explicit Impl(OpenRGBPluginAPIInterface* plugin_api) : plugin_api_(plugin_api) {}
+    Impl(OpenRGBPluginAPIInterface* plugin_api,
+        lighttrack::openrgb::OutputWriter::Mode output_mode) :
+        output_mode_(output_mode), plugin_api_(plugin_api)
+    {
+    }
 
     struct LayerState;
 
@@ -317,6 +319,13 @@ public:
         // An idle zone is blacked out once, then left alone so other
         // writers (e.g. Visual Map painting the same LEDs) are not fought.
         mutable bool cleared = false;
+        // Output geometry, read once in SetTargets: asking the controller
+        // during playback takes its AccessMutex, which a busy device holds.
+        unsigned int start = 0;
+        unsigned int count = 0;
+        bool is_segment = false;
+        float brightness = 1.0f;
+        lighttrack::openrgb::OutputWriter* writer = nullptr;
     };
 
     void SetTargets(std::vector<ControllerZone*> targets)
@@ -328,9 +337,21 @@ public:
                 && target->controller != nullptr
                 && targets_.find(target) == targets_.end())
             {
-                targets_.emplace(
-                    target,
-                    TargetState{target, std::nullopt, {}});
+                TargetState state{target, std::nullopt, {}};
+                state.start = target->start_idx();
+                state.count = target->leds_count();
+                state.is_segment = target->is_segment;
+                state.brightness = target->self_brightness / 100.0f;
+                auto& writer = writers_[target->controller];
+                if(!writer)
+                {
+                    writer = std::make_unique<
+                        lighttrack::openrgb::OutputWriter>(
+                            target->controller,
+                            output_mode_);
+                }
+                state.writer = writer.get();
+                targets_.emplace(target, state);
             }
         }
     }
@@ -497,8 +518,6 @@ public:
 
     void Reset()
     {
-        // Pending resends refer to the old controllers: cancel them.
-        alive_ = std::make_shared<int>(0);
         settle_outputs_.clear();
         output_enabled_ = false;
         used_controllers_.clear();
@@ -507,6 +526,18 @@ public:
         layers_.clear();
         effect_layers_.clear();
         targets_.clear();
+        // Sends what is still queued (e.g. the final blackout) first.
+        writers_.clear();
+    }
+
+    bool WaitForOutput(int timeout_ms)
+    {
+        bool idle = true;
+        for(auto& writer : writers_)
+        {
+            idle = writer.second->WaitIdle(timeout_ms) && idle;
+        }
+        return idle;
     }
 
     bool HasLayer(ClipId clip_id) const
@@ -884,11 +915,7 @@ private:
             {
                 return false;
             }
-            target.output->SetAllZoneLEDs(
-                *target.override_color,
-                100,
-                0,
-                0);
+            FillTarget(target, *target.override_color);
             target.cleared = true;
             settle_outputs_.insert(target.output->controller);
             return true;
@@ -901,16 +928,13 @@ private:
             {
                 target.cleared = false;
                 const unsigned int count = std::min(
-                    target.output->leds_count(),
+                    target.count,
                     route->buffer->leds_count());
                 for(unsigned int index = 0; index < count; ++index)
                 {
-                    target.output->SetLED(
-                        index,
-                        route->buffer->GetLED(index),
-                        100,
-                        0,
-                        0);
+                    target.writer->SetLed(
+                        target.start + index,
+                        Adjust(target, route->buffer->GetLED(index)));
                 }
                 return true;
             }
@@ -929,11 +953,7 @@ private:
             {
                 return false;
             }
-            target.output->SetAllZoneLEDs(
-                ColorUtils::OFF(),
-                100,
-                0,
-                0);
+            FillTarget(target, ColorUtils::OFF());
             target.cleared = true;
             settle_outputs_.insert(target.output->controller);
             return true;
@@ -941,92 +961,49 @@ private:
         return false;
     }
 
+    static RGBColor Adjust(const TargetState& target, RGBColor color)
+    {
+        return target.brightness >= 1.0f
+            ? color
+            : ColorUtils::apply_adjustments(color, target.brightness, 0, 0);
+    }
+
+    // Same result as ControllerZone::SetAllZoneLEDs.
+    static void FillTarget(const TargetState& target, RGBColor color)
+    {
+        const RGBColor adjusted = Adjust(target, color);
+        if(target.is_segment)
+        {
+            for(unsigned int index = 0; index < target.count; ++index)
+            {
+                target.writer->SetLed(target.start + index, adjusted);
+            }
+            return;
+        }
+        target.writer->FillZone(
+            target.output->zone_idx,
+            target.start,
+            target.count,
+            adjusted);
+    }
+
+    // Hands the composed frames to the device writers. One-off frames
+    // (clears, overrides) are resent shortly afterwards by the writer:
+    // OpenRGB drops an UpdateLEDs request that arrives while the device
+    // thread is still sending the previous frame, which otherwise leaves
+    // the last frame lit - most often on slow devices like Visual Map.
     void Submit(const std::set<RGBControllerInterface*>& outputs) const
     {
         for(RGBControllerInterface* output : outputs)
         {
-            ForceDirectMode(output);
-            lighttrack::openrgb::SetSubmittingOutput(true);
-            output->UpdateLEDs();
-            lighttrack::openrgb::SetSubmittingOutput(false);
-        }
-        if(!settle_outputs_.empty())
-        {
-            ScheduleSettle(settle_outputs_);
-            settle_outputs_.clear();
-        }
-    }
-
-    // OpenRGB drops an UpdateLEDs request that arrives while the device
-    // thread is still sending the previous frame (it clears its request
-    // flag after DeviceUpdateLEDs). During an effect the next frame covers
-    // that, but a one-off "clear" (a clip ending with nothing after it,
-    // start/stop, a disabled lane) would leave the last frame lit - most
-    // often on slow virtual devices like Visual Map. Resend such frames a
-    // couple of times shortly afterwards.
-    void ScheduleSettle(std::set<RGBControllerInterface*> outputs) const
-    {
-        QCoreApplication* application = QCoreApplication::instance();
-        if(application == nullptr)
-        {
-            return;
-        }
-        const std::weak_ptr<int> alive = alive_;
-        QMetaObject::invokeMethod(
-            application,
-            [alive, outputs]()
+            const auto writer = writers_.find(output);
+            if(writer != writers_.end())
             {
-                for(const int delay_ms : {40, 150})
-                {
-                    QTimer::singleShot(delay_ms, [alive, outputs]()
-                    {
-                        if(alive.expired())
-                        {
-                            return;
-                        }
-                        std::lock_guard<std::mutex> frame_guard(
-                            lighttrack::openrgb::ControllerFrameMutex());
-                        for(RGBControllerInterface* output : outputs)
-                        {
-                            output->UpdateLEDs();
-                        }
-                    });
-                }
-            },
-            Qt::QueuedConnection);
-    }
-
-    static void ForceDirectMode(RGBControllerInterface* controller)
-    {
-        if(controller == nullptr)
-        {
-            return;
-        }
-
-        for(unsigned int index = 0;
-            index < controller->GetModeCount();
-            ++index)
-        {
-            if(controller->GetModeName(index) == "Direct")
-            {
-                if(controller->GetActiveMode()
-                    != static_cast<int>(index))
-                {
-                    lighttrack::openrgb::PlaybackDiagnostics::Note(
-                        QString("mode switch to Direct on %1 (was %2)")
-                            .arg(QString::fromStdString(controller->GetName()))
-                            .arg(controller->GetActiveMode()));
-                    controller->SetActiveMode(index);
-                }
-                return;
+                writer->second->Commit(
+                    settle_outputs_.find(output) != settle_outputs_.end());
             }
         }
-
-        lighttrack::openrgb::PlaybackDiagnostics::Note(
-            QString("no Direct mode: SetCustomMode+UpdateMode on %1")
-                .arg(QString::fromStdString(controller->GetName())));
-        controller->SetCustomMode();
-        controller->UpdateMode();
+        settle_outputs_.clear();
     }
 
     std::map<ControllerZone*, TargetState> targets_;
@@ -1039,13 +1016,20 @@ private:
     bool output_enabled_ = false;
     // Controllers that just got a one-off clear, resent after Submit().
     mutable std::set<RGBControllerInterface*> settle_outputs_;
-    // Expires on Reset() so delayed resends never touch removed devices.
-    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
+    std::map<RGBControllerInterface*,
+        std::unique_ptr<lighttrack::openrgb::OutputWriter>> writers_;
+    lighttrack::openrgb::OutputWriter::Mode output_mode_;
     OpenRGBPluginAPIInterface* plugin_api_;
 };
 
-OpenRgbColorRouter::OpenRgbColorRouter(OpenRGBPluginAPIInterface* plugin_api) :
-    impl_(std::make_unique<Impl>(plugin_api))
+OpenRgbColorRouter::OpenRgbColorRouter(
+    OpenRGBPluginAPIInterface* plugin_api,
+    OutputMode output_mode) :
+    impl_(std::make_unique<Impl>(
+        plugin_api,
+        output_mode == OutputMode::Threaded
+            ? OutputWriter::Mode::Threaded
+            : OutputWriter::Mode::Synchronous))
 {
 }
 
@@ -1141,5 +1125,12 @@ void OpenRgbColorRouter::Blackout()
     std::lock_guard<std::mutex> frame_guard(
         ControllerFrameMutex());
     impl_->Blackout();
+}
+
+bool OpenRgbColorRouter::WaitForOutput(int timeout_ms)
+{
+    std::lock_guard<std::mutex> frame_guard(
+        ControllerFrameMutex());
+    return impl_->WaitForOutput(timeout_ms);
 }
 }

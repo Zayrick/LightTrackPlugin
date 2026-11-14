@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <thread>
 
 namespace
@@ -27,6 +28,55 @@ public:
     }
 
     std::vector<std::vector<RGBColor>> frames;
+};
+
+// A device whose color writes block while its (simulated) device thread is
+// busy talking to slow hardware, like a GPU on NvAPI I2C.
+class StuckController final : public TestController
+{
+public:
+    using TestController::TestController;
+
+    void SetColor(unsigned int index, RGBColor color) override
+    {
+        Wait();
+        std::lock_guard<std::mutex> guard(mutex);
+        TestController::SetColor(index, color);
+    }
+
+    void SetAllZoneColors(int index, RGBColor color) override
+    {
+        Wait();
+        std::lock_guard<std::mutex> guard(mutex);
+        TestController::SetAllZoneColors(index, color);
+    }
+
+    void UpdateLEDs() override
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        TestController::UpdateLEDs();
+    }
+
+    RGBColor Color(unsigned int index)
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        return colors.at(index);
+    }
+
+    std::atomic<bool> stuck{true};
+    std::atomic<bool> waiting{false};
+
+private:
+    void Wait()
+    {
+        while(stuck.load())
+        {
+            waiting.store(true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    std::mutex mutex;
 };
 
 class CountingEffect final : public RGBEffect
@@ -184,7 +234,8 @@ int main(int argc, char** argv)
     physical_setup.type = DEVICE_TYPE_LEDSTRIP;
     TestController output(physical_setup);
     ControllerZone output_zone(&output, 0, false, 100, true, false);
-    lighttrack::openrgb::OpenRgbColorRouter router(&api);
+    lighttrack::openrgb::OpenRgbColorRouter router(
+        &api, lighttrack::openrgb::OpenRgbColorRouter::OutputMode::Synchronous);
     router.SetTargets({&output_zone});
     router.ConfigureLayers({
         {lighttrack::ClipId(1), 0, 0, {&output_zone}},
@@ -440,7 +491,8 @@ int main(int argc, char** argv)
         strip_setup.type = DEVICE_TYPE_LEDSTRIP;
         TestController strip(strip_setup);
         ControllerZone strip_zone(&strip, 0, false, 100, true, false);
-        lighttrack::openrgb::OpenRgbColorRouter handoff_router(&api);
+        lighttrack::openrgb::OpenRgbColorRouter handoff_router(
+        &api, lighttrack::openrgb::OpenRgbColorRouter::OutputMode::Synchronous);
         handoff_router.SetTargets({&strip_zone});
         handoff_router.ConfigureLayers({
             {lighttrack::ClipId(30), 0, 0, {&strip_zone}},
@@ -466,41 +518,52 @@ int main(int argc, char** argv)
         next_clip[0]->controller->UpdateLEDs();
         CHECK(strip.colors[0] == ToRGBColor(0, 0, 255));
 
-        // Let resends from earlier clears (start of playback) finish.
-        {
-            QElapsedTimer drain;
-            drain.start();
-            while(drain.elapsed() < 300)
-            {
-                QApplication::processEvents(QEventLoop::AllEvents, 20);
-            }
-        }
         // A clip that ends with nothing following still clears once.
         handoff_router.SetLayerActive(lighttrack::ClipId(31), false);
         CHECK(strip.colors[0] == ColorUtils::OFF());
-        // That one-off clear is resent shortly after, in case the device
-        // dropped the request while busy (OpenRGB update-flag race).
-        const unsigned int cleared_updates = strip.updates;
-        QElapsedTimer settle_timer;
-        settle_timer.start();
-        while(settle_timer.elapsed() < 300)
-        {
-            QApplication::processEvents(QEventLoop::AllEvents, 20);
-        }
-        CHECK(strip.updates == cleared_updates + 2);
-        CHECK(strip.colors[0] == ColorUtils::OFF());
-
-        // Reset cancels resends that are still pending.
-        handoff_router.SetLayerActive(lighttrack::ClipId(31), true);
-        next_clip[0]->controller->UpdateLEDs();
-        handoff_router.SetLayerActive(lighttrack::ClipId(31), false);
-        const unsigned int reset_updates = strip.updates;
         handoff_router.Reset();
-        settle_timer.restart();
-        while(settle_timer.elapsed() < 300)
+    }
+
+    // Device writers resend a one-off clear shortly after, in case the
+    // device dropped the request while busy (OpenRGB update-flag race).
+    {
+        RGBController_Setup strip_setup = TestController::LinearSetup();
+        strip_setup.type = DEVICE_TYPE_LEDSTRIP;
+        TestController strip(strip_setup);
+        ControllerZone strip_zone(&strip, 0, false, 100, true, false);
+        lighttrack::openrgb::OpenRgbColorRouter settle_router(&api);
+        settle_router.SetTargets({&strip_zone});
+        settle_router.ConfigureLayers({
+            {lighttrack::ClipId(32), 0, 0, {&strip_zone}}
+        });
+        const auto clip = settle_router.LayerZones(lighttrack::ClipId(32));
+        const auto drain = [&settle_router]()
         {
-            QApplication::processEvents(QEventLoop::AllEvents, 20);
-        }
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            return settle_router.WaitForOutput(2000);
+        };
+        settle_router.StartOutput();
+        settle_router.SetLayerActive(lighttrack::ClipId(32), true);
+        clip[0]->SetAllZoneLEDs(ToRGBColor(0, 0, 255), 100, 0, 0);
+        clip[0]->controller->UpdateLEDs();
+        CHECK(drain());
+        CHECK(strip.colors[0] == ToRGBColor(0, 0, 255));
+
+        const unsigned int drawn_updates = strip.updates;
+        settle_router.SetLayerActive(lighttrack::ClipId(32), false);
+        CHECK(drain());
+        CHECK(strip.colors[0] == ColorUtils::OFF());
+        // The clear itself plus two resends.
+        CHECK(strip.updates == drawn_updates + 3);
+
+        // Reset sends what is queued and leaves nothing running after it.
+        settle_router.SetLayerActive(lighttrack::ClipId(32), true);
+        clip[0]->controller->UpdateLEDs();
+        settle_router.SetLayerActive(lighttrack::ClipId(32), false);
+        settle_router.Reset();
+        CHECK(strip.colors[0] == ColorUtils::OFF());
+        const unsigned int reset_updates = strip.updates;
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
         CHECK(strip.updates == reset_updates);
     }
 
@@ -513,7 +576,8 @@ int main(int argc, char** argv)
         CHECK(wall.GetDeviceType() == DEVICE_TYPE_VIRTUAL);
         ControllerZone wall_zone(&wall, 0, false, 100, true, false);
         ControllerZone pc_zone(&pc, 0, false, 100, true, false);
-        lighttrack::openrgb::OpenRgbColorRouter virtual_router(&api);
+        lighttrack::openrgb::OpenRgbColorRouter virtual_router(
+        &api, lighttrack::openrgb::OpenRgbColorRouter::OutputMode::Synchronous);
         virtual_router.SetTargets({&wall_zone, &pc_zone});
         virtual_router.ConfigureLayers({
             {lighttrack::ClipId(20), 0, 0, {&wall_zone}},
@@ -578,7 +642,8 @@ int main(int argc, char** argv)
     TestController oriented(oriented_setup);
     ControllerZone matrix_zone(&oriented, 0, false, 100, true, false);
     ControllerZone strip_zone(&oriented, 1, false, 100, true, false);
-    lighttrack::openrgb::OpenRgbColorRouter oriented_router(&api);
+    lighttrack::openrgb::OpenRgbColorRouter oriented_router(
+        &api, lighttrack::openrgb::OpenRgbColorRouter::OutputMode::Synchronous);
     oriented_router.SetTargets({&matrix_zone, &strip_zone});
     oriented_router.ConfigureLayers({
         {lighttrack::ClipId(10), 0, 0, {&matrix_zone, &strip_zone},
@@ -602,5 +667,78 @@ int main(int argc, char** argv)
     CHECK(oriented_router.LayerZones(lighttrack::ClipId(12))[0]->reverse);
     CHECK(!oriented_router.LayerZones(lighttrack::ClipId(13))[0]->reverse);
     oriented_router.Reset();
+
+    // A slow or stuck device (e.g. a GPU on NvAPI I2C) is written on its own
+    // thread: playback calls and the frame lock never wait for it.
+    {
+        RGBController_Setup gpu_setup = TestController::LinearSetup();
+        gpu_setup.type = DEVICE_TYPE_GPU;
+        StuckController gpu(gpu_setup);
+        ControllerZone gpu_zone(&gpu, 0, false, 100, true, false);
+        lighttrack::openrgb::OpenRgbColorRouter threaded_router(&api);
+        threaded_router.SetTargets({&gpu_zone});
+        threaded_router.ConfigureLayers({
+            {lighttrack::ClipId(40), 0, 0, {&gpu_zone}}
+        });
+        const auto layer = threaded_router.LayerZones(lighttrack::ClipId(40));
+        CHECK(layer.size() == 1);
+
+        QElapsedTimer timer;
+        timer.start();
+        threaded_router.StartOutput();
+        threaded_router.SetLayerActive(lighttrack::ClipId(40), true);
+        for(int frame = 0; frame < 50; ++frame)
+        {
+            layer[0]->SetAllZoneLEDs(
+                frame % 2 == 0 ? ToRGBColor(255, 0, 0) : ToRGBColor(0, 0, 255),
+                100,
+                0,
+                0);
+            layer[0]->controller->UpdateLEDs();
+        }
+        threaded_router.RefreshIdleOutput();
+        CHECK(timer.elapsed() < 500);
+        const auto wait_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while(!gpu.waiting.load()
+            && std::chrono::steady_clock::now() < wait_deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        CHECK(gpu.waiting.load());
+        bool locked = lighttrack::openrgb::ControllerFrameMutex().try_lock();
+        if(locked)
+        {
+            lighttrack::openrgb::ControllerFrameMutex().unlock();
+        }
+        CHECK(locked);
+
+        // Once the device is free the latest frame arrives.
+        gpu.stuck.store(false);
+        CHECK(threaded_router.WaitForOutput(2000));
+        CHECK(gpu.Color(0) == ToRGBColor(0, 0, 255));
+        CHECK(gpu.Color(1) == ToRGBColor(0, 0, 255));
+
+        // Stopping sends the blackout before the writer goes away.
+        threaded_router.StopOutput();
+        threaded_router.Reset();
+        CHECK(gpu.Color(0) == ColorUtils::OFF());
+
+        // A device that never comes back does not hang the reset either.
+        threaded_router.SetTargets({&gpu_zone});
+        threaded_router.ConfigureLayers({
+            {lighttrack::ClipId(41), 0, 0, {&gpu_zone}}
+        });
+        gpu.stuck.store(true);
+        gpu.waiting.store(false);
+        threaded_router.StartOutput();
+        threaded_router.StopOutput();
+        timer.restart();
+        threaded_router.Reset();
+        CHECK(timer.elapsed() < 1500);
+        gpu.stuck.store(false);
+        // Let the abandoned writer finish before gpu goes out of scope.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     return 0;
 }
