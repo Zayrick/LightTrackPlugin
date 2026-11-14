@@ -1,0 +1,683 @@
+#pragma once
+
+#include "../TimelineEditor.h"
+#include "../TimelineMetrics.h"
+#include "../../UiHelpers.h"
+
+#include <QAbstractScrollArea>
+#include <QByteArray>
+#include <QColor>
+#include <QGraphicsItem>
+#include <QGraphicsScene>
+#include <QGraphicsView>
+#include <QHash>
+#include <QIcon>
+#include <QPalette>
+#include <QPoint>
+#include <QPointF>
+#include <QRectF>
+#include <QSet>
+#include <QSize>
+#include <QString>
+#include <QTimer>
+#include <QTreeWidget>
+#include <QVector>
+#include <QWidget>
+
+class QDragMoveEvent;
+class QDropEvent;
+class QDragEnterEvent;
+class QDragLeaveEvent;
+class QContextMenuEvent;
+class QEvent;
+class QGraphicsEllipseItem;
+class QGraphicsLineItem;
+class QGraphicsSceneHoverEvent;
+class QGraphicsSceneMouseEvent;
+class QKeyEvent;
+class QLabel;
+class QAction;
+class QMenu;
+class QMouseEvent;
+class QPainter;
+class QPaintEvent;
+class QPropertyAnimation;
+class QPushButton;
+class QResizeEvent;
+class QScrollBar;
+class QStyleOptionGraphicsItem;
+class QStyleOptionViewItem;
+class QTreeWidgetItem;
+class QWheelEvent;
+
+namespace lighttrack::timeline_internal
+{
+inline constexpr const char* EFFECT_MIME = "application/x-lighttrack-effect";
+inline constexpr const char* CLIP_MIME =
+    "application/x-lighttrack-timeline-clips";
+
+inline constexpr qreal ROW_HEIGHT = 36.0;
+// The music row shows the left channel on top and the right one below.
+inline constexpr qreal MUSIC_ROW_HEIGHT = 2.0 * ROW_HEIGHT;
+inline constexpr qreal EFFECT_ROW_HEIGHT = 28.0;
+inline constexpr qreal CLIP_HEIGHT = 32.0;
+inline constexpr qint64 CLIP_MIN_DURATION_MS = 1;
+inline constexpr qreal CLIP_MIN_DISPLAY_WIDTH = 6.0;
+inline constexpr qreal CLIP_DEFAULT_WIDTH = 130.0;
+inline constexpr qreal TIMELINE_TICK_TARGET_WIDTH = 90.0;
+inline constexpr qreal RESIZE_HANDLE_WIDTH = 9.0;
+inline constexpr qreal PLAYHEAD_HANDLE_RADIUS = 6.0;
+inline constexpr qreal SNAP_DISTANCE = 8.0;
+
+using lighttrack::timeline_metrics::EFFECTS_PANEL_WIDTH;
+using lighttrack::timeline_metrics::GAP;
+using lighttrack::timeline_metrics::GRID_WIDTH;
+using lighttrack::timeline_metrics::LABEL_WIDTH;
+using lighttrack::timeline_metrics::RULER_HEIGHT;
+using lighttrack::timeline_metrics::TIMELINE_MIN_WIDTH;
+using lighttrack::timeline_metrics::TIMELINE_ZOOM_MAX;
+using lighttrack::timeline_metrics::TIMELINE_ZOOM_MIN;
+using lighttrack::ui::HeaderLabel;
+
+enum EffectListRole
+{
+    EffectIdRole = Qt::UserRole + 1,
+    LaneIndexRole,
+    LaneActionStateRole,
+    LaneCommittedNameRole,
+    LaneCommittedActionStateRole,
+    LaneLedCountRole,
+    LaneHiddenRole
+};
+
+struct LaneInfo
+{
+    QString name;
+    QRectF rect;
+    int level = 0;
+};
+
+QColor WithAlpha(QColor color, int alpha);
+QColor TextLineColor(
+    const QPalette& palette,
+    int light_alpha,
+    int dark_alpha);
+qint64 TimelineTickIntervalMs(qreal pixels_per_second);
+QString FormatTimelineTime(
+    qint64 time_ms,
+    qint64 tick_interval_ms);
+void PaintClipCard(
+    QPainter* painter,
+    const QRectF& rect,
+    const EffectDescriptor& effect,
+    bool preview,
+    bool selected = false);
+QPoint EventPosition(const QDropEvent* event);
+QPoint EventPosition(const QDragMoveEvent* event);
+class OverlayScrollBar final : public QWidget
+{
+public:
+    explicit OverlayScrollBar(
+        QAbstractScrollArea* scroll_area,
+        Qt::Orientation orientation);
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    bool event(QEvent* event) override;
+    void paintEvent(QPaintEvent*) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+
+private:
+    static constexpr int HIT_WIDTH = 14;
+    static constexpr int THUMB_WIDTH = 5;
+    static constexpr int EDGE_MARGIN = 3;
+    static constexpr int TRACK_PADDING = 2;
+    static constexpr int MIN_THUMB_LENGTH = 28;
+    static constexpr int REVEAL_DISTANCE = 26;
+    static constexpr int HIDE_DELAY_MS = 650;
+    bool IsScrollable() const;
+    qreal AxisPosition(const QPoint& point) const;
+    qreal TrackLength() const;
+    qreal ThumbLength() const;
+    QRectF ThumbRect() const;
+    void SetValueFromThumbPosition(qreal position);
+    void UpdateGeometry();
+    void UpdatePointerProximity(const QPoint& viewport_position);
+    void UpdatePointerProximityFromCursor();
+    void Reveal();
+    void RevealTemporarily();
+    void FadeTo(qreal target);
+    QAbstractScrollArea* scroll_area;
+    QScrollBar* scroll_bar;
+    Qt::Orientation orientation;
+    QTimer fade_timer;
+    QTimer hide_timer;
+    qreal opacity = 0.0;
+    qreal target_opacity = 0.0;
+    qreal drag_offset = 0.0;
+    qreal wheel_remainder = 0.0;
+    bool pointer_near = false;
+    bool dragging = false;
+};
+
+class ClipPreviewItem final : public QGraphicsItem
+{
+public:
+    ClipPreviewItem();
+    QRectF boundingRect() const override;
+    void SetPreview(qreal clip_width, const EffectDescriptor& preview_effect);
+    void paint(
+        QPainter* painter,
+        const QStyleOptionGraphicsItem*,
+        QWidget*) override;
+
+private:
+    qreal width = CLIP_DEFAULT_WIDTH;
+    EffectDescriptor effect;
+};
+
+class MusicSpectrumItem final : public QGraphicsItem
+{
+public:
+    MusicSpectrumItem();
+    QRectF boundingRect() const override;
+    void SetSpectrum(
+        const QVector<qreal>& new_levels,
+        qreal new_width,
+        qreal new_height);
+    // Left/right channel peaks; when empty, the mono levels are drawn in
+    // both channel bands.
+    void SetPeaks(const WaveformPeaks& new_peaks);
+    void SetStyle(WaveformStyle new_style);
+    // Playhead x in item coordinates (used by the Progress style).
+    void SetPlayedWidth(qreal played_width);
+    void paint(
+        QPainter* painter,
+        const QStyleOptionGraphicsItem* option,
+        QWidget*) override;
+
+private:
+    // One channel's drawing area: vertical center and half-height.
+    struct Band
+    {
+        int channel = 0;
+        qreal top = 0.0;
+        qreal height = 0.0;
+        qreal Center() const { return top + height / 2.0; }
+        qreal Amplitude() const { return height * 0.46; }
+    };
+
+    // Loudest level (0..1) of a channel in the item x range [x0, x1].
+    qreal Peak(int channel, qreal x0, qreal x1) const;
+    // Lowest/highest sample (-1..1) of a channel in [x0, x1].
+    void MinMax(int channel, qreal x0, qreal x1, qreal& low, qreal& high) const;
+    void PaintSmooth(QPainter* painter, const Band& band, qreal x0, qreal x1, bool fill) const;
+    void PaintBars(QPainter* painter, const Band& band, qreal x0, qreal x1, bool progress) const;
+    void PaintClassic(QPainter* painter, const Band& band, qreal x0, qreal x1) const;
+    void PaintStudio(QPainter* painter, const Band& band, qreal x0, qreal x1) const;
+
+    QVector<qreal> levels;
+    WaveformPeaks peaks;
+    qreal width = 0.0;
+    qreal height = 0.0;
+    qreal played = 0.0;
+    WaveformStyle style = WaveformStyle::Studio;
+};
+
+class TimelineClipItem final : public QGraphicsItem
+{
+public:
+    TimelineClipItem(ClipId id, const EffectDescriptor& effect);
+    QRectF boundingRect() const override;
+    void paint(
+        QPainter* painter,
+        const QStyleOptionGraphicsItem* option,
+        QWidget*) override;
+    void hoverMoveEvent(QGraphicsSceneHoverEvent* event) override;
+    void hoverLeaveEvent(QGraphicsSceneHoverEvent*) override;
+    ClipId Id() const;
+    const EffectDescriptor& Effect() const;
+    int LaneIndex() const;
+    void SetLaneIndex(int index);
+    qreal ClipWidth() const;
+    void SetClipWidth(qreal clip_width);
+    bool IsResizeHandle(const QPointF& pos) const;
+    bool IsLeftResizeHandle(const QPointF& pos) const;
+    bool IsRightResizeHandle(const QPointF& pos) const;
+    quint64 GroupId() const { return group_id; }
+    void SetGroupId(quint64 value) { group_id = value; update(); }
+
+private:
+    quint64 group_id = 0;
+    ClipId id;
+    EffectDescriptor effect;
+    int lane_index = 0;
+    qreal width = CLIP_DEFAULT_WIDTH;
+};
+
+class LightTrackScene final : public QGraphicsScene
+{
+public:
+    explicit LightTrackScene(QObject* parent = nullptr);
+    void SetEffects(const QVector<EffectGroup>& groups);
+    void SetPalette(const QPalette& new_palette);
+    void SetViewportSize(const QSize& size);
+    void SetLanes(
+        const QVector<TimelineLane>& entries,
+        const QString& empty_text);
+    void SetVisibleLanes(const QVector<int>& indices);
+    void SetMusicSpectrum(
+        const QVector<qreal>& spectrum,
+        qint64 duration_ms);
+    void SetMusicPosition(qint64 position_ms);
+    void SetWaveformStyle(WaveformStyle style);
+    void SetMusicPeaks(const WaveformPeaks& peaks);
+    void SetMinimumContentDuration(qint64 duration_ms);
+    void SetMusicSeekCallback(TimelineEditor::MusicSeekCallback callback);
+    void SetClipSelectedCallback(
+        TimelineEditor::ClipSelectedCallback callback);
+    void SetClipActivatedCallback(
+        TimelineEditor::ClipActivatedCallback callback);
+    void SetClipRemovedCallback(
+        TimelineEditor::ClipRemovedCallback callback);
+    void SetClipDuplicatedCallback(
+        TimelineEditor::ClipDuplicatedCallback callback);
+    void SetTimelineChangedCallback(
+        TimelineEditor::TimelineChangedCallback callback);
+    void ClearTimelineClips();
+    ClipId RestoreClip(
+        const QString& effect_id,
+        int lane,
+        qint64 start_ms,
+        qint64 end_ms,
+        ClipId requested_id,
+        quint64 group_id = 0);
+    void SetSnappingEnabled(bool enabled);
+    bool SetPixelsPerSecond(qreal value);
+    qreal PixelsPerSecond() const;
+    qreal ContentWidth() const;
+    QVector<TimelineClip> TimelineClips() const;
+    QVector<TimelineClip> PersistentTimelineClips() const;
+    bool PreviewEffectAt(const QString& effect_id, const QPointF& pos);
+    bool AddEffectAt(const QString& effect_id, const QPointF& pos);
+    void ClearPreview();
+    bool HasSelectedClips() const;
+    bool SelectClipAt(const QPointF& pos);
+    bool CopySelectedClips();
+    bool CanPasteCopiedClips() const;
+    bool PasteCopiedClips();
+    bool DeleteSelectedClips();
+
+protected:
+    void drawBackground(QPainter* painter, const QRectF& rect) override;
+    void drawForeground(QPainter* painter, const QRectF& rect) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override;
+    void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override;
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
+
+public:
+    // Grouping: grouped clips select and move together.
+    bool GroupSelectedClips();
+    bool UngroupSelectedClips();
+    bool CanGroupSelection() const;
+    bool CanUngroupSelection() const;
+
+private:
+    // Selects/deselects every clip in the clicked clip's group.
+    void SetGroupSelected(const TimelineClipItem* clip, bool selected);
+    // Grows the selection to whole groups.
+    void ExpandSelectionToGroups();
+    quint64 NextGroupId() const;
+    enum DragMode
+    {
+        NoDrag,
+        ClipMove,
+        ClipResizeLeft,
+        ClipResizeRight,
+        BoxSelection,
+        PlayheadSeek
+    };
+    enum ClipClickAction
+    {
+        KeepClipSelection,
+        SelectOnlyClickedClip,
+        DeselectClickedClip
+    };
+    struct ClipMoveStart
+    {
+        TimelineClipItem* clip;
+        qreal x;
+        int lane;
+        int visible_row;
+    };
+    template<typename ItemType>
+    ItemType* Track(ItemType* item);
+    const EffectDescriptor* FindEffect(const QString& id) const;
+    bool ContainsClipId(ClipId id) const;
+    ClipId AllocateClipId(ClipId requested);
+    QVector<TimelineClip> BuildClipSnapshots(bool persistent) const;
+    void ClearLayoutItems();
+    void ClearClips();
+    void RebuildLayout();
+    void EnsureContentWidth(qreal right);
+    void RefreshInheritedClips();
+    void PaintRow(
+        QPainter* painter,
+        const QRectF& row_rect,
+        const QColor& fill,
+        const QColor& border,
+        const QColor& grid,
+        const QRectF& exposed) const;
+    void RelayoutClips();
+    bool IsDescendantLane(int lane, int ancestor_lane) const;
+    void PaintGhostClip(
+        QPainter* painter,
+        const QRectF& exposed,
+        int lane,
+        qreal x,
+        qreal width,
+        const EffectDescriptor& effect,
+        bool preview_ghost) const;
+    void PaintInheritedClips(
+        QPainter* painter,
+        const QRectF& exposed) const;
+    TimelineClipItem* ClipAt(const QPointF& pos) const;
+    int LaneAt(const QPointF& pos) const;
+    qreal ClipY(int lane) const;
+    qreal SnapClipX(
+        qreal x,
+        qreal width,
+        const TimelineClipItem* ignored_clip) const;
+    qreal SnapEdgeX(
+        qreal x,
+        const TimelineClipItem* ignored_clip) const;
+    qreal SnapDelta(
+        const QVector<qreal>& moving_edges,
+        const QSet<const TimelineClipItem*>& ignored_clips) const;
+    qreal MusicPixelWidth() const;
+    void AddMusicItems();
+    void UpdatePlayhead();
+    bool IsPlayheadHandle(const QPointF& pos) const;
+    void SeekMusicAt(qreal x);
+    void UpdateBoxSelection(const QPointF& pos, const QPoint& screen_pos);
+    void UpdateClipMove(const QPointF& pos, const QPoint& screen_pos);
+    void UpdateClipResize(const QPointF& pos);
+    void ShowPreview(
+        int lane,
+        qreal x,
+        qreal width,
+        const EffectDescriptor& effect);
+    void HidePreview();
+    TimelineClipItem* AddClip(
+        const EffectDescriptor& effect,
+        int lane,
+        qreal x,
+        qreal width,
+        bool select,
+        bool notify_change,
+        ClipId requested_id);
+    qreal DefaultClipWidth() const;
+    void RemoveClip(TimelineClipItem* clip);
+    void NotifyClipSelected(TimelineClipItem* clip);
+    void NotifyTimelineChanged();
+    void CancelDrag(bool restore_positions = true);
+    QHash<QString, EffectDescriptor> effects;
+    QPalette palette;
+    QSize viewport_size;
+    QVector<TimelineLane> lane_entries;
+    QVector<int> visible_lane_indices;
+    QVector<LaneInfo> lanes;
+    QVector<QGraphicsItem*> layout_items;
+    QVector<TimelineClipItem*> clips;
+    QString empty_message;
+    QVector<qreal> music_spectrum;
+    WaveformPeaks music_peaks;
+    WaveformStyle waveform_style = WaveformStyle::Studio;
+    TimelineEditor::MusicSeekCallback music_seek_callback;
+    TimelineEditor::ClipSelectedCallback clip_selected_callback;
+    TimelineEditor::ClipActivatedCallback clip_activated_callback;
+    TimelineEditor::ClipRemovedCallback clip_removed_callback;
+    TimelineEditor::ClipDuplicatedCallback
+        clip_duplicated_callback;
+    TimelineEditor::TimelineChangedCallback timeline_changed_callback;
+    QString clipboard_source_id;
+    QByteArray last_pasted_clip_data;
+    int paste_sequence = 0;
+    qint64 music_duration_ms = 0;
+    qint64 music_position_ms = 0;
+    qint64 minimum_content_duration_ms = 0;
+    qreal pixels_per_second = GRID_WIDTH;
+    bool snapping_enabled = true;
+    quint64 next_clip_id = 0;
+    DragMode drag_mode = NoDrag;
+    QPointF drag_scene_start;
+    QPoint drag_screen_start;
+    QVector<ClipMoveStart> moving_clips;
+    QSet<const TimelineClipItem*> moving_clip_items;
+    ClipClickAction pending_clip_click = KeepClipSelection;
+    bool clip_move_started = false;
+    QRectF selection_rect;
+    QSet<TimelineClipItem*> selection_before_drag;
+    bool selection_box_visible = false;
+    qreal clip_start_x = 0.0;
+    qreal clip_start_width = CLIP_DEFAULT_WIDTH;
+    int clip_start_lane = -1;
+    int last_preview_lane = -1;
+    qreal last_preview_x = 0.0;
+    qreal last_preview_width = CLIP_DEFAULT_WIDTH;
+    EffectDescriptor last_preview_effect;
+    TimelineClipItem* active_clip = nullptr;
+    ClipPreviewItem* preview = nullptr;
+    MusicSpectrumItem* music_item = nullptr;
+    QGraphicsLineItem* playhead_item = nullptr;
+    QGraphicsEllipseItem* playhead_handle = nullptr;
+};
+
+class TimelineRulerWidget final : public QWidget
+{
+public:
+    explicit TimelineRulerWidget(QWidget* parent = nullptr);
+    void SetLabelWidth(qreal width);
+    void SetContentWidth(qreal width);
+    void SetPixelsPerSecond(qreal value);
+    void SetScrollOffset(int offset);
+    void SetHideZeroLedZonesChangedCallback(
+        std::function<void(bool)> callback);
+    void SetHideDisabledLanesChangedCallback(
+        std::function<void(bool)> callback);
+    void SetChooseDevicesRequestedCallback(
+        std::function<void()> callback);
+    void SetExpandAllRequestedCallback(
+        std::function<void(bool)> callback);
+    void SetDevicesExpanded(bool expanded);
+
+protected:
+    void paintEvent(QPaintEvent*) override;
+    void resizeEvent(QResizeEvent* event) override;
+
+private:
+    void UpdateDeviceButtonGeometry();
+    qreal label_width = LABEL_WIDTH;
+    qreal content_width = TIMELINE_MIN_WIDTH;
+    qreal pixels_per_second = GRID_WIDTH;
+    int horizontal_offset = 0;
+    QPushButton* hide_zero_led_zones_button = nullptr;
+    QMenu* lane_filter_menu = nullptr;
+    QAction* hide_zero_led_action = nullptr;
+    QAction* hide_disabled_action = nullptr;
+    std::function<void(bool)> hide_disabled_lanes_changed_callback;
+    void UpdateLaneFilterButton();
+    std::function<void(bool)>
+        hide_zero_led_zones_changed_callback;
+    QPushButton* expand_all_button = nullptr;
+    QPushButton* choose_devices_button = nullptr;
+    std::function<void()> choose_devices_requested_callback;
+    std::function<void(bool)> expand_all_requested_callback;
+    bool devices_expanded = true;
+};
+
+class LaneListWidget final : public QTreeWidget
+{
+public:
+    explicit LaneListWidget(QWidget* parent = nullptr);
+    void SetLanes(const QVector<TimelineLane>& lanes);
+    void SetVisibilityChangedCallback(
+        std::function<void(const QVector<int>&)> callback);
+    void SetWidthChangedCallback(
+        std::function<void(int)> callback);
+    void SetLaneRenamedCallback(
+        TimelineEditor::LaneRenamedCallback callback);
+    void SetLaneHighlightedCallback(
+        TimelineEditor::LaneStateChangedCallback callback);
+    void SetLaneDisabledCallback(
+        TimelineEditor::LaneStateChangedCallback callback);
+    void SetHideZeroLedZones(bool hide);
+    void SetHideDisabledLanes(bool hide);
+    void SetLaneHidden(int lane_index, bool hidden);
+    void SetAllExpanded(bool expanded);
+    bool AnyDeviceExpanded() const;
+    void SetExpansionChangedCallback(
+        std::function<void(bool)> callback);
+    QVector<int> VisibleLaneIndices() const;
+
+protected:
+    void drawRow(
+        QPainter* painter,
+        const QStyleOptionViewItem& option,
+        const QModelIndex& index) const override;
+    void resizeEvent(QResizeEvent* event) override;
+
+private:
+    void AppendVisibleLaneIndices(
+        const QTreeWidgetItem* item,
+        QVector<int>& indices) const;
+    bool ApplyZeroLedFilter(QTreeWidgetItem* item);
+    void HandleItemChanged(QTreeWidgetItem* item, int column);
+    void NotifyVisibleLanesChanged();
+    void HandleExpansionChanged();
+    bool rebuilding = false;
+    std::function<void(bool)> expansion_changed_callback;
+    bool hide_zero_led_zones = false;
+    bool hide_disabled_lanes = false;
+    void ReapplyFilters();
+    std::function<void(const QVector<int>&)>
+        visibility_changed_callback;
+    std::function<void(int)> width_changed_callback;
+    TimelineEditor::LaneRenamedCallback lane_renamed_callback;
+    TimelineEditor::LaneStateChangedCallback
+        lane_highlighted_callback;
+    TimelineEditor::LaneStateChangedCallback
+        lane_disabled_callback;
+};
+
+class EffectsListWidget final : public QTreeWidget
+{
+public:
+    explicit EffectsListWidget(QWidget* parent = nullptr);
+    void SetEffects(const QVector<EffectGroup>& groups);
+
+protected:
+    void startDrag(Qt::DropActions) override;
+
+private:
+    QIcon ColorIcon(const QColor& color) const;
+};
+
+class LightTrackView final : public QGraphicsView
+{
+public:
+    explicit LightTrackView(QWidget* parent = nullptr);
+    void SetRuler(TimelineRulerWidget* ruler_widget);
+    void SetEffects(const QVector<EffectGroup>& groups);
+    void SetLanes(
+        const QVector<TimelineLane>& lanes,
+        const QString& empty_text);
+    void SetVisibleLanes(const QVector<int>& lane_indices);
+    void SetMusicSpectrum(
+        const QVector<qreal>& spectrum,
+        qint64 duration_ms);
+    void SetMusicPosition(qint64 position_ms, bool turn_page);
+    // When off, playback never scrolls the view by itself.
+    void SetFollowPlayhead(bool follow) { follow_playhead = follow; }
+    void SetWaveformStyle(WaveformStyle style);
+    void SetMusicPeaks(const WaveformPeaks& peaks);
+    void SetMinimumTimelineDuration(qint64 duration_ms);
+    QVector<TimelineClip> TimelineClips() const;
+    QVector<TimelineClip> PersistentTimelineClips() const;
+    void ClearTimelineClips();
+    ClipId RestoreClip(
+        const QString& effect_id,
+        int lane,
+        qint64 start_ms,
+        qint64 end_ms,
+        ClipId requested_id,
+        quint64 group_id = 0);
+    void SetMusicSeekCallback(
+        TimelineEditor::MusicSeekCallback callback);
+    void SetClipSelectedCallback(
+        TimelineEditor::ClipSelectedCallback callback);
+    void SetClipActivatedCallback(
+        TimelineEditor::ClipActivatedCallback callback);
+    // Placement mode: the effect follows the mouse and a left click on a
+    // lane places it. Esc or right-click cancels.
+    void BeginPlacement(const QString& effect_id);
+    void CancelPlacement();
+    bool IsPlacing() const { return !placing_effect_id.isEmpty(); }
+    void SetClipRemovedCallback(
+        TimelineEditor::ClipRemovedCallback callback);
+    void SetClipDuplicatedCallback(
+        TimelineEditor::ClipDuplicatedCallback callback);
+    void SetTimelineChangedCallback(
+        TimelineEditor::TimelineChangedCallback callback);
+    void SetHorizontalZoom(int pixels_per_second);
+    void SetSnappingEnabled(bool enabled);
+
+protected:
+    void keyPressEvent(QKeyEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    static constexpr qreal PAGE_TURN_TRIGGER_RATIO = 0.84;
+    static constexpr qreal PAGE_TURN_LANDING_RATIO = 0.14;
+    static constexpr int PAGE_TURN_DURATION_MS = 360;
+    void MaybeTurnPlaybackPage(qint64 position_ms);
+    void SyncRuler();
+    LightTrackScene* light_scene;
+    TimelineRulerWidget* ruler = nullptr;
+    QPropertyAnimation* page_turn_animation = nullptr;
+    QVector<EffectGroup> effect_groups;
+    QString placing_effect_id;
+    bool swallow_release = false;
+    bool cancelled_by_right_click = false;
+    bool follow_playhead = true;
+};
+
+// Fills a menu with one submenu per effect category; on_chosen receives the
+// chosen effect id.
+void PopulateEffectMenu(
+    QMenu* menu,
+    const QVector<EffectGroup>& groups,
+    const std::function<void(const QString&)>& on_chosen);
+// Adds one action per effect of a single category.
+void AddEffectActions(
+    QMenu* menu,
+    const EffectGroup& group,
+    const std::function<void(const QString&)>& on_chosen);
+}

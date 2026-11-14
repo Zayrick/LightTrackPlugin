@@ -1,0 +1,75 @@
+name: Main pre-release
+run-name: Pre-release ${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lighttrack-main-prerelease
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build packages
+    uses: ./.github/workflows/build.yml
+    with:
+      source_ref: ${{ github.sha }}
+
+  publish:
+    name: Publish pre-release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          pattern: LightTrackPlugin-*-*
+          merge-multiple: true
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          base_version="$(sed -nE 's/^project\(LightTrackPlugin VERSION ([0-9]+\.[0-9]+\.[0-9]+) .*/\1/p' CMakeLists.txt)"
+          if [ -z "$base_version" ]; then
+            echo 'Unable to read the current version from CMakeLists.txt.' >&2
+            exit 1
+          fi
+
+          # Pipeline version: <cmake version>-build.<run number>, e.g. 0.1.0-build.42
+          tag="${base_version}-build.${GITHUB_RUN_NUMBER}"
+          if [ "${GITHUB_RUN_ATTEMPT}" != "1" ]; then
+            tag="${tag}.${GITHUB_RUN_ATTEMPT}"
+          fi
+          short_sha="$(git rev-parse --short HEAD)"
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$tag" "$GITHUB_SHA" -m "$tag"
+          git push origin "refs/tags/$tag"
+
+          download_base="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          download_notes="$(sed "s|{{DOWNLOAD_BASE}}|$download_base|g" .github/release-downloads.template.md)"
+          release_notes="$(printf 'Automated build from main at %s. May be unstable.\n\n%s' "$GITHUB_SHA" "$download_notes")"
+
+          gh release create "$tag" release-assets/* \
+            --title "$tag ($short_sha)" \
+            --notes "$release_notes" \
+            --prerelease \
+            --verify-tag
