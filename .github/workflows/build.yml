@@ -1,93 +1,45 @@
-name: Build
+name: Build packages
 
-# Release: builds and attaches the plugin to the published GitHub release.
-# Nightly: builds the default branch every day (only if something changed
-#          since the last nightly) and replaces the "nightly" pre-release.
-# Manual:  builds any branch; the files are kept as workflow artifacts and,
-#          if asked, published as the nightly pre-release.
 on:
-  release:
-    types: [published]
-  schedule:
-    - cron: "0 18 * * *" # 02:00 UTC+8
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      publish_nightly:
-        description: Also publish this build as the nightly pre-release
-        type: boolean
-        default: false
+      source_ref:
+        description: Commit or ref to build
+        required: true
+        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: build-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'release' }}
-
-env:
-  # Must match the Qt that OpenRGB ships (OpenRGB 1.0 for Windows: 6.8.3).
-  QT_WINDOWS_VERSION: "6.8.3"
-
 jobs:
-  prepare:
-    name: Prepare
-    runs-on: ubuntu-latest
-    outputs:
-      build: ${{ steps.changes.outputs.build }}
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Skip nightly without new commits
-        id: changes
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          last=$(git rev-parse -q --verify "refs/tags/nightly^{commit}" || true)
-          if [ "$last" = "$(git rev-parse HEAD)" ]; then
-            echo "No new commits since the last nightly build."
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Version
-        id: version
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            version="${{ github.event.release.tag_name }}"
-          else
-            version="nightly-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Version: $version"
-
   build:
-    name: Build (${{ matrix.name }})
-    needs: prepare
-    if: needs.prepare.outputs.build == 'true'
+    name: LightTrackPlugin-${{ matrix.system }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      BUILD_TYPE: Release
+      # Must match the Qt that OpenRGB ships (OpenRGB 1.0 for Windows: 6.8.3).
+      QT_VERSION: '6.8.3'
+      ASSET_NAME: LightTrackPlugin-${{ matrix.system }}-${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: windows-x64
-            os: windows-2022
-            library: build/Release/LightTrackPlugin.dll
-          - name: linux-x64
-            os: ubuntu-24.04
-            library: build/libLightTrackPlugin.so
-    runs-on: ${{ matrix.os }}
-    env:
-      PACKAGE: LightTrackPlugin-${{ needs.prepare.outputs.version }}-${{ matrix.name }}
+          - system: Windows
+            arch: x64
+            os: windows
+            runner: windows-2022
+            qt_arch: win64_msvc2022_64
+            cmake_arch: x64
+          - system: Linux
+            arch: x64
+            os: linux
+            runner: ubuntu-24.04
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.source_ref }}
           submodules: true
 
       # Only the Effects plugin dependencies that are compiled in; its own
@@ -98,17 +50,42 @@ jobs:
           git -C deps/OpenRGBEffectsPlugin submodule update --init
           Dependencies/QCodeEditor Dependencies/SimplexNoise
 
-      - name: Install Qt (Windows)
-        if: runner.os == 'Windows'
+      - name: Install Qt
+        if: matrix.os == 'windows'
         uses: jurplel/install-qt-action@v4
         with:
-          version: ${{ env.QT_WINDOWS_VERSION }}
-          arch: win64_msvc2022_64
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: ${{ matrix.qt_arch }}
           modules: qt5compat
           cache: true
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Build Windows package
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cmake -S . -B build -A "${{ matrix.cmake_arch }}" "-DCMAKE_CONFIGURATION_TYPES=$env:BUILD_TYPE" "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR" -DBUILD_TESTING=ON
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          & cmake --build build --config "$env:BUILD_TYPE" --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          & ctest --test-dir build -C "$env:BUILD_TYPE" --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+
+          New-Item -ItemType Directory -Force -Path package, dist | Out-Null
+          $plugin = Get-ChildItem build -Recurse -Filter LightTrackPlugin.dll |
+            Where-Object { $_.FullName -match "\\$env:BUILD_TYPE\\" } |
+            Select-Object -First 1
+          if (-not $plugin) { throw 'LightTrackPlugin.dll not found' }
+
+          Copy-Item -LiteralPath $plugin.FullName -Destination package
+          Copy-Item -LiteralPath LICENSE, README.md -Destination package
+          Compress-Archive -Path 'package\*' -DestinationPath "dist\$env:ASSET_NAME.zip" -Force
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -118,71 +95,26 @@ jobs:
             libgl-dev libvulkan-dev libxkbcommon-dev \
             libopenal-dev libpipewire-0.3-dev
 
-      - name: Configure
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
-              -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-              -DBUILD_TESTING=ON
-          else
-            cmake -S . -B build -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_TESTING=ON
-          fi
-
-      - name: Build
-        run: cmake --build build --config Release --parallel
-
-      - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Build Linux package
+        if: matrix.os == 'linux'
         env:
           QT_QPA_PLATFORM: offscreen
-
-      - name: Package
-        shell: bash
         run: |
-          mkdir -p "dist/$PACKAGE"
-          cp "${{ matrix.library }}" "dist/$PACKAGE/"
-          cp README.md "dist/$PACKAGE/"
-          cd dist
-          cmake -E tar cf "$PACKAGE.zip" --format=zip "$PACKAGE"
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DBUILD_TESTING=ON
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
 
-      - uses: actions/upload-artifact@v4
+          mkdir -p package dist
+          plugin="$(find build -name libLightTrackPlugin.so -type f | head -n 1)"
+          test -n "$plugin"
+          cp "$plugin" package/
+          cp LICENSE README.md package/
+          tar -C package -czf "dist/$ASSET_NAME.tar.gz" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.PACKAGE }}
-          path: dist/${{ env.PACKAGE }}.zip
+          name: ${{ env.ASSET_NAME }}
+          path: dist/${{ env.ASSET_NAME }}.*
           if-no-files-found: error
-
-  publish:
-    name: Publish
-    needs: [prepare, build]
-    if: >
-      github.event_name == 'release'
-      || github.event_name == 'schedule'
-      || (github.event_name == 'workflow_dispatch' && inputs.publish_nightly)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Attach to release
-        if: github.event_name == 'release'
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.zip --clobber
-
-      - name: Replace nightly pre-release
-        if: github.event_name != 'release'
-        run: |
-          gh release delete nightly --cleanup-tag --yes || true
-          gh release create nightly dist/*.zip \
-            --prerelease \
-            --target "$GITHUB_SHA" \
-            --title "Nightly build (${{ needs.prepare.outputs.version }})" \
-            --notes "Automatic build of ${GITHUB_REF_NAME} at ${GITHUB_SHA}. May be unstable."
